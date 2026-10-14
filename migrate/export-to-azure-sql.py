@@ -1,6 +1,6 @@
 """
 SQLite to Azure SQL Database Exporter
-Extracts data from the existing SQLite database (Cloudflare D1 Miniflare / local SQLite)
+Extracts data from the existing local SQLite database
 and generates:
 1. azure_data_seed.sql (T-SQL script with N'...' for Thai text, ready to run in Azure Portal Query Editor)
 2. sqlite_dump.json (JSON dump ready for automated programmatic migration)
