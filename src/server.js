@@ -300,7 +300,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { username, password, full_name, department, position } = req.body;
+    const { username, password, full_name, email, department, position } = req.body;
     const cleanUsername = (username || '').trim();
 
     const existingResult = await query(
@@ -316,15 +316,17 @@ app.post('/api/auth/register', async (req, res) => {
     const id = `u_${Date.now()}`;
     const now = new Date().toISOString();
     const displayName = (full_name && full_name.trim()) ? full_name.trim() : cleanUsername;
+    const userEmail = (email && email.trim()) ? email.trim() : null;
 
     await query(`
-      INSERT INTO dbo.users (id, username, password, full_name, department, position, role, status, is_safety_committee, created_at, updated_at)
-      VALUES (@id, @username, @password, @full_name, @department, @position, @role, 'pending', 0, @created_at, @updated_at)
+      INSERT INTO dbo.users (id, username, password, full_name, email, department, position, role, status, is_safety_committee, created_at, updated_at)
+      VALUES (@id, @username, @password, @full_name, @email, @department, @position, @role, 'pending', 0, @created_at, @updated_at)
     `, {
       id,
       username: cleanUsername,
       password: password || '123456',
       full_name: displayName,
+      email: userEmail,
       department: department || '',
       position: userPosition,
       role,
@@ -398,7 +400,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.get('/api/users', async (req, res) => {
   try {
     const result = await query(`
-      SELECT id, username, password, full_name, pending_full_name, department, position, role,
+      SELECT id, username, password, full_name, pending_full_name, email, department, position, role,
              status, is_safety_committee, avatar_url, created_at, updated_at
       FROM dbo.users
       ORDER BY created_at DESC
@@ -420,13 +422,14 @@ app.post('/api/users', async (req, res) => {
     const now = new Date().toISOString();
 
     await query(`
-      INSERT INTO dbo.users (id, username, password, full_name, department, position, role, status, is_safety_committee, avatar_url, created_at, updated_at)
-      VALUES (@id, @username, @password, @full_name, @department, @position, @role, 'approved', @is_safety_committee, @avatar_url, @created_at, @updated_at)
+      INSERT INTO dbo.users (id, username, password, full_name, email, department, position, role, status, is_safety_committee, avatar_url, created_at, updated_at)
+      VALUES (@id, @username, @password, @full_name, @email, @department, @position, @role, 'approved', @is_safety_committee, @avatar_url, @created_at, @updated_at)
     `, {
       id,
       username: data.username,
       password: data.password || '123456',
       full_name: data.full_name || data.username,
+      email: data.email ? data.email.trim() : null,
       department: data.department || '',
       position: data.position || '',
       role: data.role || 'P1',
@@ -451,6 +454,7 @@ app.put('/api/users/:id', async (req, res) => {
     await query(`
       UPDATE dbo.users SET
         full_name = COALESCE(@full_name, full_name),
+        email = COALESCE(@email, email),
         department = COALESCE(@department, department),
         position = COALESCE(@position, position),
         role = COALESCE(@role, role),
@@ -459,9 +463,10 @@ app.put('/api/users/:id', async (req, res) => {
         password = COALESCE(@password, password),
         avatar_url = COALESCE(@avatar_url, avatar_url),
         updated_at = @updated_at
-      WHERE id = @id
+      WHERE id = @id OR (@username IS NOT NULL AND LOWER(LTRIM(RTRIM(username))) = LOWER(LTRIM(RTRIM(@username))))
     `, {
       full_name: data.full_name || null,
+      email: data.email !== undefined ? (data.email ? data.email.trim() : null) : null,
       department: data.department || null,
       position: data.position || null,
       role: data.role || null,
@@ -469,6 +474,7 @@ app.put('/api/users/:id', async (req, res) => {
       is_safety_committee: data.is_safety_committee !== undefined ? (data.is_safety_committee ? 1 : 0) : null,
       password: data.password || null,
       avatar_url: data.avatar_url || null,
+      username: data.username || null,
       updated_at: now,
       id
     });
@@ -2077,6 +2083,36 @@ async function start() {
     
     // Optional schema setup check (non-blocking)
     initSchema().catch((e) => console.log('Schema init notice:', e.message));
+
+    // Ensure email column exists on dbo.users
+    try {
+      await query(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.users') AND name = 'email')
+        BEGIN
+          ALTER TABLE dbo.users ADD email NVARCHAR(255) NULL;
+        END;
+      `);
+    } catch (e) {
+      console.log('User schema column check notice:', e.message);
+    }
+
+    // De-duplicate users table if duplicate records exist for the same username
+    try {
+      await query(`
+        WITH CTE AS (
+          SELECT id, username,
+                 ROW_NUMBER() OVER(
+                   PARTITION BY LOWER(LTRIM(RTRIM(username)))
+                   ORDER BY COALESCE(updated_at, created_at) DESC
+                 ) as rn
+          FROM dbo.users
+          WHERE username IS NOT NULL AND LTRIM(RTRIM(username)) <> ''
+        )
+        DELETE FROM CTE WHERE rn > 1;
+      `);
+    } catch (e) {
+      console.log('User duplicate cleanup notice:', e.message);
+    }
 
     // Start background cron jobs
     startScheduler();
