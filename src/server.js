@@ -6,6 +6,13 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { query, initSchema, sql } from './db.js';
 import { startScheduler, runMonthlyReset, runYearlyCleanup } from './scheduler.js';
+import {
+  uploadImageToAzureBlob,
+  getAzureBlobStream,
+  isBlobStorageConfigured,
+  getStorageInfo,
+  getContainerClient
+} from './blobStorage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,23 +20,15 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 8787;
 
-// Uploads directory for image files
+// Uploads directory for image files (local fallback/cache)
 const uploadsDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Multer storage configuration
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    const safeName = path.basename(file.originalname, ext).replace(/\s+/g, '_');
-    cb(null, `${Date.now()}_${safeName}${ext}`);
-  }
-});
+// Multer memory storage configuration (allows direct streaming to Azure Blob Storage)
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB max limit
 });
 
@@ -50,20 +49,33 @@ app.use((req, res, next) => {
 // 0. Health Check & Diagnostics
 // ==========================================
 app.get('/api/health', async (req, res) => {
+  const storageInfo = getStorageInfo();
   try {
     const testResult = await query('SELECT 1 as is_alive');
+    const isDbAlive = Boolean(testResult.recordset && testResult.recordset[0]?.is_alive === 1);
     res.json({
       status: 'ok',
       service: 'shesystem-azure-sql-api',
-      database: 'Azure SQL Database',
-      db_alive: Boolean(testResult.recordset && testResult.recordset[0]?.is_alive === 1),
+      database: {
+        type: 'Microsoft Azure SQL Database',
+        server: process.env.AZURE_SQL_SERVER || 'halls.database.windows.net',
+        name: process.env.AZURE_SQL_DATABASE || 'shedatabase',
+        db_alive: isDbAlive
+      },
+      storage: storageInfo,
       timestamp: new Date().toISOString()
     });
   } catch (err) {
     res.status(500).json({
       status: 'error',
       service: 'shesystem-azure-sql-api',
-      database: 'Azure SQL Database',
+      database: {
+        type: 'Microsoft Azure SQL Database',
+        server: process.env.AZURE_SQL_SERVER || 'halls.database.windows.net',
+        name: process.env.AZURE_SQL_DATABASE || 'shedatabase',
+        db_alive: false
+      },
+      storage: storageInfo,
       error: err.message
     });
   }
@@ -930,31 +942,82 @@ app.post('/api/inspections', async (req, res) => {
 // ==========================================
 // 7. Image Upload & File Serving Endpoints
 // ==========================================
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'ไม่พบไฟล์รูปภาพที่อัปโหลด' });
     }
-    const fileKey = `photos/${req.file.filename}`;
+
+    const ext = path.extname(req.file.originalname) || '.jpg';
+    const safeName = path.basename(req.file.originalname, ext).replace(/[^a-zA-Z0-9_\u0E00-\u0E7F-]/g, '_');
+    const filename = `${Date.now()}_${safeName}${ext}`;
+    const fileKey = `photos/${filename}`;
+
+    // Write to local cache / uploads directory as reliable backup
+    try {
+      const localFilePath = path.join(uploadsDir, filename);
+      fs.writeFileSync(localFilePath, req.file.buffer);
+    } catch (fsErr) {
+      console.warn('⚠️ บันทึกไฟล์ลงแคชในเครื่องไม่สำเร็จ:', fsErr.message);
+    }
+
+    // Upload to Microsoft Azure Blob Storage (Container: picshesystem)
+    if (isBlobStorageConfigured()) {
+      try {
+        const uploadResult = await uploadImageToAzureBlob(
+          req.file.buffer,
+          req.file.originalname,
+          req.file.mimetype || 'image/jpeg'
+        );
+        return res.json({
+          success: true,
+          key: uploadResult.key,
+          url: uploadResult.url,
+          blob_url: uploadResult.blobUrl,
+          storage: 'azure-blob'
+        });
+      } catch (blobErr) {
+        console.warn('⚠️ อัปโหลดไปยัง Azure Blob Storage ไม่สำเร็จ จะใช้การเสิร์ฟไฟล์ผ่าน API ชั่วคราว:', blobErr.message);
+      }
+    }
+
     const url = `/api/images/${fileKey}`;
-    res.json({ success: true, key: fileKey, url });
+    res.json({ success: true, key: fileKey, url, storage: 'local' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/images/*', (req, res) => {
+app.get('/api/images/*', async (req, res) => {
   try {
     const subPath = req.params[0] || req.path.replace(/^\/api\/images\//, '');
     const filename = path.basename(subPath);
-    const filePath = path.join(uploadsDir, filename);
 
+    // 1. ลองดึงรูปภาพจาก Microsoft Azure Blob Storage (Container: picshesystem) ก่อน
+    if (isBlobStorageConfigured()) {
+      try {
+        const blobData = await getAzureBlobStream(subPath);
+        if (blobData && blobData.stream) {
+          res.setHeader('Content-Type', blobData.contentType || 'image/jpeg');
+          if (blobData.contentLength) {
+            res.setHeader('Content-Length', blobData.contentLength);
+          }
+          res.setHeader('Cache-Control', 'public, max-age=31536000');
+          return blobData.stream.pipe(res);
+        }
+      } catch (blobErr) {
+        console.warn('⚠️ ดึงรูปภาพจาก Azure Blob Storage ล้มเหลว ตรวจสอบไฟล์ในเครื่องแทน:', blobErr.message);
+      }
+    }
+
+    // 2. หากไม่พบใน Blob หรือยังไม่ได้ตั้งค่า Key ให้ค้นหาจากโฟลเดอร์ uploads ในเครื่อง
+    const filePath = path.join(uploadsDir, filename);
     if (fs.existsSync(filePath)) {
       res.setHeader('Cache-Control', 'public, max-age=31536000');
       return res.sendFile(filePath);
     }
 
-    res.status(404).send('Image Not Found');
+    res.status(404).send('Image Not Found in Azure Blob Storage or Local Cache');
   } catch (err) {
     res.status(500).send('Error loading image');
   }

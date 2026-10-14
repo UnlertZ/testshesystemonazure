@@ -109,12 +109,18 @@ azure-sql-api/
    ```powershell
    Copy-Item .env.example .env
    ```
-4. แก้ไขข้อมูลใน `.env` ให้ตรงกับ Azure SQL Server ของคุณ:
+4. แก้ไขข้อมูลใน `.env` ให้ตรงกับ Azure SQL Server และ Azure Blob Storage:
    ```env
-   AZURE_SQL_SERVER=shesystem-server.database.windows.net
-   AZURE_SQL_DATABASE=shesystem
+   # 1. Microsoft Azure SQL Database
+   AZURE_SQL_SERVER=halls.database.windows.net
+   AZURE_SQL_DATABASE=shedatabase
    AZURE_SQL_USER=cloudadmin
    AZURE_SQL_PASSWORD=YourPassword123!
+
+   # 2. Microsoft Azure Blob Storage (สำหรับเก็บรูปภาพ)
+   AZURE_STORAGE_CONTAINER_NAME=picshesystem
+   AZURE_STORAGE_ACCOUNT_NAME=halls
+   AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=halls;AccountKey=...;EndpointSuffix=core.windows.net
    ```
    *(หรือใส่ `AZURE_SQL_CONNECTION_STRING` แบบเต็มเส้นเดียวจาก Azure Portal ก็ได้)*
 
@@ -122,7 +128,7 @@ azure-sql-api/
    ```powershell
    npm run migrate
    ```
-   ระบบจะตรวจสอบโครงสร้างตาราง ดึงข้อมูลจาก SQLite และบันทึกเข้า Azure SQL พร้อมแสดงตารางสรุปผลอย่างละเอียด
+   ระบบจะตรวจสอบโครงสร้างตาราง ดึงข้อมูลจาก SQLite และบันทึกเข้า Azure SQL Database (`shedatabase`) พร้อมแสดงตารางสรุปผลอย่างละเอียด
 
 ---
 
@@ -132,15 +138,25 @@ azure-sql-api/
    ```powershell
    npm start
    ```
-2. ทดสอบความพร้อมของ API และการเชื่อมต่อ Azure SQL:
+2. ทดสอบความพร้อมของ API และการเชื่อมต่อ Azure SQL & Azure Blob Storage:
    - เปิดบราวเซอร์ไปที่: `http://localhost:8787/api/health`
    - จะได้รับผลลัพธ์:
      ```json
      {
        "status": "ok",
        "service": "shesystem-azure-sql-api",
-       "database": "Azure SQL Database",
-       "db_alive": true,
+       "database": {
+         "type": "Microsoft Azure SQL Database",
+         "server": "halls.database.windows.net",
+         "name": "shedatabase",
+         "db_alive": true
+       },
+       "storage": {
+         "type": "Microsoft Azure Blob Storage",
+         "container": "picshesystem",
+         "account": "halls",
+         "configured": true
+       },
        "timestamp": "2026-10-14T..."
      }
      ```
