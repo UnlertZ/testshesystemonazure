@@ -14,7 +14,6 @@ import {
   getStorageInfo,
   getContainerClient
 } from './blobStorage.js';
-import { sendEmail, dispatchNotificationEmail } from './services/emailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,7 +22,7 @@ const app = express();
 const PORT = process.env.PORT || 8787;
 
 /**
- * Helper: Insert notification into database and automatically trigger Azure Communication Services email dispatch
+ * Helper: Insert notification into database
  */
 async function insertNotification({ id, recipient_user_id, target_role, sender_name, title, message, type = 'SYSTEM', created_at }) {
   const notifId = id || `notif_${Date.now()}`;
@@ -41,16 +40,6 @@ async function insertNotification({ id, recipient_user_id, target_role, sender_n
     type: type || 'SYSTEM',
     created_at: now
   });
-
-  // Automatically dispatch email notification to user(s) via Azure Communication Services
-  dispatchNotificationEmail(query, {
-    recipient_user_id,
-    target_role,
-    title,
-    message,
-    type,
-    sender_name
-  }).catch(err => console.warn('Email dispatch warning:', err.message));
 
   return notifId;
 }
@@ -1614,32 +1603,6 @@ app.post('/api/notifications/send', async (req, res) => {
     res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Test Email Endpoint (Azure Communication Services)
-app.post('/api/email/test', async (req, res) => {
-  try {
-    const { to } = req.body;
-    if (!to || !to.includes('@')) {
-      return res.status(400).json({ error: 'กรุณาระบุอีเมลผู้รับที่ถูกต้อง' });
-    }
-
-    const result = await sendEmail({
-      to: to.trim(),
-      subject: '[SHE System] ทดสอบการส่งอีเมลแจ้งเตือน (Email Notification Test)',
-      title: 'ทดสอบระบบแจ้งเตือนทางอีเมล',
-      message: 'นี่คือข้อความทดสอบจากระบบ SHE System ยืนยันว่าการเชื่อมต่อ Azure Communication Services ทำงานได้อย่างสมบูรณ์',
-      senderName: 'ระบบบริหารความปลอดภัย SHE System'
-    });
-
-    if (result.success) {
-      res.json({ success: true, message: `ส่งอีเมลทดสอบไปยัง ${to} สำเร็จแล้ว`, messageId: result.messageId });
-    } else {
-      res.status(500).json({ success: false, error: result.error });
-    }
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
   }
 });
 
