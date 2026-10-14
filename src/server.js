@@ -14,12 +14,46 @@ import {
   getStorageInfo,
   getContainerClient
 } from './blobStorage.js';
+import { sendEmail, dispatchNotificationEmail } from './services/emailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 8787;
+
+/**
+ * Helper: Insert notification into database and automatically trigger Azure Communication Services email dispatch
+ */
+async function insertNotification({ id, recipient_user_id, target_role, sender_name, title, message, type = 'SYSTEM', created_at }) {
+  const notifId = id || `notif_${Date.now()}`;
+  const now = created_at || new Date().toISOString();
+  await query(`
+    INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
+    VALUES (@id, @recipient_user_id, @target_role, @sender_name, @title, @message, @type, 0, @created_at)
+  `, {
+    id: notifId,
+    recipient_user_id: recipient_user_id || null,
+    target_role: target_role || null,
+    sender_name: sender_name || 'SHE System',
+    title: title || '',
+    message: message || '',
+    type: type || 'SYSTEM',
+    created_at: now
+  });
+
+  // Automatically dispatch email notification to user(s) via Azure Communication Services
+  dispatchNotificationEmail(query, {
+    recipient_user_id,
+    target_role,
+    title,
+    message,
+    type,
+    sender_name
+  }).catch(err => console.warn('Email dispatch warning:', err.message));
+
+  return notifId;
+}
 
 // Uploads directory for image files (local fallback/cache)
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -335,15 +369,12 @@ app.post('/api/auth/register', async (req, res) => {
     });
 
     // Notify admin
-    const notifId = `notif_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, NULL, 'P3', @sender, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
-      sender: 'ระบบสมัครสมาชิก',
+    await insertNotification({
+      target_role: 'P3',
+      sender_name: 'ระบบสมัครสมาชิก',
       title: 'มีสมาชิกรอการอนุมัติ',
       message: `ผู้ใช้ ${displayName} (${department || ''} - ${userPosition}) สมัครสมาชิกเข้าสู่ระบบ รอการอนุมัติ`,
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -376,15 +407,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     );
 
     // Notify admin
-    const notifId = `notif_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, NULL, 'P3', @sender, @title, @message, 'PASSWORD_RESET', 0, @created_at)
-    `, {
-      id: notifId,
-      sender: user.username,
+    await insertNotification({
+      target_role: 'P3',
+      sender_name: user.username,
       title: 'คำขอรีเซ็ทรหัสผ่าน',
       message: `ผู้ใช้ ${user.username} ขอรีเซ็ทรหัสผ่าน กรุณาตรวจสอบและดำเนินการ`,
+      type: 'PASSWORD_RESET',
       created_at: now
     });
 
@@ -499,21 +527,17 @@ app.put('/api/users/:id/safety-committee', async (req, res) => {
       id
     });
 
-    const notifId = `notif_${Date.now()}`;
     const title = is_safety_committee ? 'คุณได้รับการแต่งตั้งเป็นคณะกรรมการ คปอ.' : 'แจ้งปรับสถานะคณะกรรมการ คปอ.';
     const message = is_safety_committee
       ? `คุณได้รับการแต่งตั้งให้เป็น คณะกรรมการความปลอดภัย อาชีวอนามัย และสภาพแวดล้อมในการทำงาน (คปอ.) โดย ${admin_name || 'แอดมิน'}`
       : `คุณพ้นจากสถานะ คณะกรรมการความปลอดภัย (คปอ.) เรียบร้อยแล้ว`;
 
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, @recipient_user_id, NULL, @sender_name, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
+    await insertNotification({
       recipient_user_id: id,
       sender_name: admin_name || 'แอดมิน',
       title,
       message,
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -536,16 +560,12 @@ app.post('/api/users/:id/approve', async (req, res) => {
       id
     });
 
-    const notifId = `notif_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, @recipient_user_id, NULL, @sender_name, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
+    await insertNotification({
       recipient_user_id: id,
       sender_name: 'แอดมิน',
       title: approved ? 'บัญชีของคุณได้รับการอนุมัติแล้ว' : 'บัญชีของคุณไม่ได้รับการอนุมัติ',
       message: approved ? 'คุณสามารถเข้าสู่ระบบและเริ่มใช้งาน SHE System ได้ทันที' : 'ขออภัย บัญชีของคุณไม่ได้รับการอนุมัติการใช้งาน',
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -606,15 +626,12 @@ app.post('/api/users/:id/request-name-change', async (req, res) => {
       id
     });
 
-    const notifId = `notif_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, NULL, 'P3', @sender, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
-      sender: 'ระบบเปลี่ยนชื่อ-นามสกุล',
+    await insertNotification({
+      target_role: 'P3',
+      sender_name: 'ระบบเปลี่ยนชื่อ-นามสกุล',
       title: 'มีคำขออนุมัติเปลี่ยนชื่อ-นามสกุล',
       message: `ผู้ใช้ ${user.full_name || user.username} (${user.department}) ขอเปลี่ยนชื่อเป็น "${cleanName}" กรุณาตรวจสอบและอนุมัติในหน้าจัดการสมาชิก`,
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -652,18 +669,14 @@ app.post('/api/users/:id/approve-name-change', async (req, res) => {
       await query('UPDATE dbo.users SET pending_full_name = NULL, updated_at = @now WHERE id = @id', { now, id });
     }
 
-    const notifId = `notif_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, @recipient_user_id, NULL, @sender_name, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
+    await insertNotification({
       recipient_user_id: id,
       sender_name: admin_name || 'แอดมิน',
       title: approve ? 'คำขอเปลี่ยนชื่อได้รับการอนุมัติแล้ว' : 'คำขอเปลี่ยนชื่อไม่ได้รับการอนุมัติ',
       message: approve
         ? `แอดมินได้อนุมัติการเปลี่ยนชื่อของคุณเป็น "${targetPendingName}" เรียบร้อยแล้ว`
         : `ขออภัย คำขอเปลี่ยนชื่อเป็น "${targetPendingName}" ไม่ได้รับการอนุมัติจากแอดมิน`,
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -982,15 +995,12 @@ app.post('/api/inspections', async (req, res) => {
 
     // If abnormal, notify admins
     if (isAbnormal) {
-      const notifId = `notif_${Date.now()}`;
-      await query(`
-        INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-        VALUES (@id, NULL, 'P3', @sender, @title, @message, 'DEFECT', 0, @created_at)
-      `, {
-        id: notifId,
-        sender: data.inspector_name,
+      await insertNotification({
+        target_role: 'P3',
+        sender_name: data.inspector_name,
         title: 'แจ้งเตือนพบอุปกรณ์ชำรุด/ผิดปกติ',
         message: `อุปกรณ์ ${data.equipment_code || data.equipment_id} พบปัญหา: ${data.abnormal_description}`,
+        type: 'DEFECT',
         created_at: now
       });
     }
@@ -1451,19 +1461,15 @@ app.post('/api/tasks', async (req, res) => {
       updated_at: now
     });
 
-    const notifId = `notif_${Date.now()}`;
     const assignerName = data.assigned_by_name || 'ผู้มอบหมายงาน';
     const dueDateMsg = data.due_date ? ` (กำหนดเสร็จ: ${data.due_date})` : '';
 
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, @recipient_user_id, NULL, @sender_name, @title, @message, 'TASK', 0, @created_at)
-    `, {
-      id: notifId,
+    await insertNotification({
       recipient_user_id: data.assigned_to_id,
       sender_name: assignerName,
       title: 'คุณได้รับมอบหมายงานใหม่',
       message: `คุณได้รับมอบหมายงาน: "${data.title}" จาก ${assignerName}${dueDateMsg}`,
+      type: 'TASK',
       created_at: now
     });
 
@@ -1507,19 +1513,15 @@ app.patch('/api/tasks/:id/status', async (req, res) => {
     });
 
     if (status === 'COMPLETED' && existingTask.status !== 'COMPLETED' && existingTask.assigned_by_id) {
-      const notifId = `notif_${Date.now()}`;
       const doerName = completer_name || existingTask.assigned_to_name || 'ผู้รับมอบหมาย';
       const notesMsg = notes ? ` (บันทึก: ${notes})` : '';
 
-      await query(`
-        INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-        VALUES (@id, @recipient_user_id, NULL, @sender_name, @title, @message, 'TASK', 0, @created_at)
-      `, {
-        id: notifId,
+      await insertNotification({
         recipient_user_id: existingTask.assigned_by_id,
         sender_name: doerName,
         title: 'งานที่มอบหมายดำเนินการเสร็จสิ้นแล้ว',
         message: `งาน "${existingTask.title}" ได้รับการทำสำเร็จเรียบร้อยแล้ว โดย ${doerName}${notesMsg}`,
+        type: 'TASK',
         created_at: now
       });
     }
@@ -1597,14 +1599,9 @@ app.get('/api/notifications', async (req, res) => {
 app.post('/api/notifications/send', async (req, res) => {
   try {
     const { recipient_user_id, target_role, sender_name, title, message, type } = req.body;
-    const id = `notif_${Date.now()}`;
     const now = new Date().toISOString();
 
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, @recipient_user_id, @target_role, @sender_name, @title, @message, @type, 0, @created_at)
-    `, {
-      id,
+    const id = await insertNotification({
       recipient_user_id: recipient_user_id || null,
       target_role: target_role || null,
       sender_name: sender_name || 'ระบบ',
@@ -1617,6 +1614,32 @@ app.post('/api/notifications/send', async (req, res) => {
     res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Test Email Endpoint (Azure Communication Services)
+app.post('/api/email/test', async (req, res) => {
+  try {
+    const { to } = req.body;
+    if (!to || !to.includes('@')) {
+      return res.status(400).json({ error: 'กรุณาระบุอีเมลผู้รับที่ถูกต้อง' });
+    }
+
+    const result = await sendEmail({
+      to: to.trim(),
+      subject: '[SHE System] ทดสอบการส่งอีเมลแจ้งเตือน (Email Notification Test)',
+      title: 'ทดสอบระบบแจ้งเตือนทางอีเมล',
+      message: 'นี่คือข้อความทดสอบจากระบบ SHE System ยืนยันว่าการเชื่อมต่อ Azure Communication Services ทำงานได้อย่างสมบูรณ์',
+      senderName: 'ระบบบริหารความปลอดภัย SHE System'
+    });
+
+    if (result.success) {
+      res.json({ success: true, message: `ส่งอีเมลทดสอบไปยัง ${to} สำเร็จแล้ว`, messageId: result.messageId });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1757,15 +1780,12 @@ app.post('/api/safety-patrols', async (req, res) => {
       updated_at: now
     });
 
-    const notifId = `notif_patrol_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, NULL, 'ALL', @sender_name, @title, @message, 'SYSTEM', 0, @created_at)
-    `, {
-      id: notifId,
+    await insertNotification({
+      target_role: 'ALL',
       sender_name: data.created_by_name || 'แอดมิน คปอ.',
       title: 'เปิดรอบเดินตรวจ คปอ. ใหม่',
       message: `มีรายการเดินตรวจ คปอ. วันที่ ${data.patrol_date} (${timeRange}) สมาชิก คปอ. สามารถกดเข้าร่วมเพื่อบันทึกข้อมูลได้แล้ว`,
+      type: 'SYSTEM',
       created_at: now
     });
 
@@ -1928,15 +1948,12 @@ app.put('/api/safety-findings/:id/resolve', async (req, res) => {
       id
     });
 
-    const notifId = `notif_rev_${Date.now()}`;
-    await query(`
-      INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-      VALUES (@id, NULL, 'P3', @sender, @title, @message, 'TASK', 0, @created_at)
-    `, {
-      id: notifId,
-      sender: data.resolved_by_name || 'สมาชิก คปอ.',
+    await insertNotification({
+      target_role: 'P3',
+      sender_name: data.resolved_by_name || 'สมาชิก คปอ.',
       title: 'มีการส่งผลแก้ไขปัญหา (Before/After) รอตรวจสอบ',
       message: `รายการที่ "${data.location || 'คปอ.'}" ได้รับการแก้ไขและแนบรูปผลการแก้ไขแล้ว กรุณาเข้าตรวจสอบผล`,
+      type: 'TASK',
       created_at: now
     });
 
@@ -1980,18 +1997,13 @@ app.put('/api/safety-findings/:id/review', async (req, res) => {
 
     const targetUserId = finding.resolved_by_id || finding.reporter_id;
     if (targetUserId) {
-      const notifId = `notif_review_${Date.now()}`;
       const title = approved ? 'การแก้ไขปัญหาผ่านการตรวจสอบแล้ว' : 'ผลการแก้ไขไม่ผ่าน (ส่งกลับไปแก้ใหม่)';
       const message = approved
         ? `รายการที่ "${finding.location}" ผ่านการตรวจสอบจากแอดมิน (${reviewer_name || 'แอดมิน'}) บันทึกผลสำเร็จเรียบร้อยแล้ว`
         : `รายการที่ "${finding.location}" ไม่ผ่านการตรวจสอบ: "${reject_reason || 'กรุณาแก้ไขเพิ่มเติม'}" กรุณาดำเนินการแก้ไขและส่งรูปภาพผลการแก้ไขใหม่อีกครั้ง`;
 
-      await query(`
-        INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
-        VALUES (@id, @targetUserId, NULL, @sender_name, @title, @message, @type, 0, @created_at)
-      `, {
-        id: notifId,
-        targetUserId,
+      await insertNotification({
+        recipient_user_id: targetUserId,
         sender_name: reviewer_name || 'แอดมิน คปอ.',
         title,
         message,
