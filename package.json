@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "build": "echo 'Build complete'",
+    "build": "node -e \"import('fs').then(fs => { if (fs.existsSync('dist') && !fs.existsSync('build')) fs.cpSync('dist', 'build', { recursive: true }); else if (fs.existsSync('build') && !fs.existsSync('dist')) fs.cpSync('build', 'dist', { recursive: true }); console.log('Build complete'); })\"",
     "migrate": "node migrate/migrate.js",
     "export-sql": "node migrate/export-to-azure-sql.js"
   },

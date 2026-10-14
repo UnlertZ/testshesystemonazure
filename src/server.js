@@ -46,8 +46,71 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 0. Health Check & Diagnostics
+// 0. Root & Health Check Endpoints
 // ==========================================
+const distDir = path.join(__dirname, '..', 'dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+}
+
+app.get('/', (req, res) => {
+  // If frontend build exists, serve index.html
+  const indexHtmlPath = path.join(distDir, 'index.html');
+  if (fs.existsSync(indexHtmlPath)) {
+    return res.sendFile(indexHtmlPath);
+  }
+
+  // Otherwise, return friendly API landing page
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="th">
+    <head>
+      <meta charset="UTF-8">
+      <title>SHE System - Azure API Service</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
+        .card { max-width: 650px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
+        h1 { color: #38bdf8; margin-top: 0; font-size: 24px; display: flex; align-items: center; gap: 10px; }
+        .badge { background: #059669; color: white; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: normal; }
+        .item { margin-bottom: 16px; padding: 12px; background: #0f172a; border-radius: 8px; border-left: 4px solid #38bdf8; font-size: 14px; }
+        .item b { color: #94a3b8; display: block; margin-bottom: 4px; font-size: 12px; text-transform: uppercase; }
+        .links a { display: inline-block; margin-right: 12px; margin-top: 8px; color: #38bdf8; text-decoration: none; padding: 6px 12px; background: #334155; border-radius: 6px; font-size: 13px; }
+        .links a:hover { background: #475569; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>🚀 SHE System API Service <span class="badge">Online</span></h1>
+        <p style="color: #94a3b8; line-height: 1.6;">โปรเจกต์นี้เป็น <b>REST API Backend</b> สำหรับเชื่อมต่อ Microsoft Azure Portal</p>
+        
+        <div class="item">
+          <b>ฐานข้อมูล (Database)</b>
+          Microsoft Azure SQL Database: <code>${process.env.AZURE_SQL_DATABASE || 'shedatabase'}</code> (<code>${process.env.AZURE_SQL_SERVER || 'halls.database.windows.net'}</code>)
+        </div>
+        
+        <div class="item">
+          <b>ที่เก็บรูปภาพ (Blob Storage)</b>
+          Microsoft Azure Blob Storage: <code>${process.env.AZURE_STORAGE_CONTAINER_NAME || 'picshesystem'}</code>
+        </div>
+        
+        <div class="item">
+          <b>หมายเหตุเรื่องหน้าเว็บ (Frontend)</b>
+          โค้ดหน้าเว็บ React UI อยู่ที่โฟลเดอร์ <code>shesystem</code> หรือสามารถนำไฟล์ Build มาวางในโฟลเดอร์ <code>dist/</code> ของโปรเจกต์นี้เพื่อเปิดหน้าเว็บได้ทันที
+        </div>
+
+        <div class="links">
+          <b style="color: #94a3b8; display: block; margin-top: 16px;">Quick API Links:</b>
+          <a href="/api/health" target="_blank">📡 /api/health (ตรวจสถานะ)</a>
+          <a href="/api/equipment" target="_blank">🧯 /api/equipment</a>
+          <a href="/api/departments" target="_blank">🏢 /api/departments</a>
+          <a href="/api/users" target="_blank">👥 /api/users</a>
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
 app.get('/api/health', async (req, res) => {
   const storageInfo = getStorageInfo();
   try {
@@ -1633,6 +1696,19 @@ app.post('/api/cron/yearly-cleanup', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ==========================================
+// SPA Client-Side Routing Fallback
+// ==========================================
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  const targetDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, '..', 'build');
+  const indexFile = path.join(targetDir, 'index.html');
+  if (fs.existsSync(indexFile)) {
+    return res.sendFile(indexFile);
+  }
+  next();
 });
 
 // ==========================================
