@@ -5,10 +5,11 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { query, initSchema, sql } from './db.js';
-import { startScheduler, runMonthlyReset, runYearlyCleanup } from './scheduler.js';
+import { startScheduler, runMonthlyReset, runYearlyCleanup, runRetentionCleanup } from './scheduler.js';
 import {
   uploadImageToAzureBlob,
   getAzureBlobStream,
+  deleteAzureBlob,
   isBlobStorageConfigured,
   getStorageInfo,
   getContainerClient
@@ -1233,6 +1234,167 @@ app.get('/api/images/*', async (req, res) => {
     res.status(500).send('Error loading image');
   }
 });
+
+// ==========================================
+// Delete Images from Azure Blob Storage & Database
+// ==========================================
+app.post('/api/images/delete', async (req, res) => {
+  try {
+    const {
+      type, // 'single_equipment' | 'all_equipment' | 'single_inspection' | 'single_finding' | 'all_patrol' | 'direct'
+      equipmentId,
+      field, // 'inspection_sheet_photo' | 'location_photo' | 'defect_photo' | 'inspection_photo'
+      inspectionId,
+      findingId,
+      findingField, // 'photo_url' | 'after_photo_url'
+      patrolId,
+      url
+    } = req.body;
+
+    let deletedBlobs = 0;
+
+    const cleanupFile = async (fileUrlOrKey) => {
+      if (!fileUrlOrKey) return;
+      try {
+        await deleteAzureBlob(fileUrlOrKey);
+        deletedBlobs++;
+      } catch (err) {
+        console.warn('⚠️ deleteAzureBlob error:', err.message);
+      }
+      try {
+        const basename = path.basename(fileUrlOrKey);
+        const localPath = path.join(uploadsDir, basename);
+        if (fs.existsSync(localPath)) {
+          fs.unlinkSync(localPath);
+        }
+      } catch (_) {}
+    };
+
+    // 1. Direct URL/Key deletion
+    if (url || type === 'direct') {
+      const targetUrl = url || req.body.key;
+      if (targetUrl) {
+        await cleanupFile(targetUrl);
+      }
+    }
+
+    // 2. Single Equipment Photo
+    if (type === 'single_equipment' && equipmentId && field) {
+      const validFields = ['inspection_sheet_photo', 'location_photo', 'defect_photo'];
+      if (validFields.includes(field)) {
+        const itemRes = await query(`SELECT ${field} FROM dbo.equipment WHERE id = @equipmentId`, { equipmentId });
+        const oldUrl = itemRes.recordset?.[0]?.[field];
+        if (oldUrl) {
+          await cleanupFile(oldUrl);
+        }
+        await query(`UPDATE dbo.equipment SET ${field} = NULL, updated_at = @now WHERE id = @equipmentId`, {
+          equipmentId,
+          now: new Date().toISOString()
+        });
+      }
+    }
+
+    // 3. Single Inspection Photo
+    if (type === 'single_inspection' && inspectionId && field) {
+      const validFields = ['inspection_photo', 'location_photo'];
+      if (validFields.includes(field)) {
+        const itemRes = await query(`SELECT ${field} FROM dbo.inspections WHERE id = @inspectionId`, { inspectionId });
+        const oldUrl = itemRes.recordset?.[0]?.[field];
+        if (oldUrl) {
+          await cleanupFile(oldUrl);
+        }
+        await query(`UPDATE dbo.inspections SET ${field} = NULL WHERE id = @inspectionId`, { inspectionId });
+      }
+    }
+
+    // 4. All Photos of an Equipment
+    if (type === 'all_equipment' && equipmentId) {
+      const eqRes = await query(
+        'SELECT inspection_sheet_photo, location_photo, defect_photo FROM dbo.equipment WHERE id = @equipmentId',
+        { equipmentId }
+      );
+      if (eqRes.recordset?.length > 0) {
+        const eq = eqRes.recordset[0];
+        for (const f of ['inspection_sheet_photo', 'location_photo', 'defect_photo']) {
+          if (eq[f]) {
+            await cleanupFile(eq[f]);
+          }
+        }
+        await query(
+          'UPDATE dbo.equipment SET inspection_sheet_photo = NULL, location_photo = NULL, defect_photo = NULL, updated_at = @now WHERE id = @equipmentId',
+          { equipmentId, now: new Date().toISOString() }
+        );
+      }
+
+      const inspRes = await query(
+        'SELECT id, inspection_photo, location_photo FROM dbo.inspections WHERE equipment_id = @equipmentId',
+        { equipmentId }
+      );
+      for (const insp of inspRes.recordset || []) {
+        if (insp.inspection_photo) {
+          await cleanupFile(insp.inspection_photo);
+        }
+        if (insp.location_photo) {
+          await cleanupFile(insp.location_photo);
+        }
+      }
+      await query(
+        'UPDATE dbo.inspections SET inspection_photo = NULL, location_photo = NULL WHERE equipment_id = @equipmentId',
+        { equipmentId }
+      );
+    }
+
+    // 5. Single Finding Photo
+    if (type === 'single_finding' && findingId && findingField) {
+      const validFields = ['photo_url', 'after_photo_url'];
+      if (validFields.includes(findingField)) {
+        const findingRes = await query(`SELECT ${findingField} FROM dbo.safety_findings WHERE id = @findingId`, { findingId });
+        const oldUrl = findingRes.recordset?.[0]?.[findingField];
+        if (oldUrl) {
+          await cleanupFile(oldUrl);
+        }
+        await query(`UPDATE dbo.safety_findings SET ${findingField} = NULL WHERE id = @findingId`, { findingId });
+      }
+    }
+
+    // 6. All Photos of a Safety Patrol Round
+    if (type === 'all_patrol' && patrolId) {
+      const findingsRes = await query(
+        'SELECT id, photo_url, after_photo_url FROM dbo.safety_findings WHERE patrol_id = @patrolId',
+        { patrolId }
+      );
+      for (const finding of findingsRes.recordset || []) {
+        if (finding.photo_url) {
+          await cleanupFile(finding.photo_url);
+        }
+        if (finding.after_photo_url) {
+          await cleanupFile(finding.after_photo_url);
+        }
+      }
+      await query(
+        'UPDATE dbo.safety_findings SET photo_url = NULL, after_photo_url = NULL WHERE patrol_id = @patrolId',
+        { patrolId }
+      );
+    }
+
+    res.json({ success: true, message: 'ลบรูปภาพสำเร็จ', deleted_blobs: deletedBlobs });
+  } catch (err) {
+    console.error('❌ ข้อผิดพลาดในการลบรูปภาพ:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2-Year Retention Purge Trigger Endpoint
+app.post('/api/cleanup/retention-2years', async (req, res) => {
+  try {
+    const result = await runRetentionCleanup(2);
+    res.json(result);
+  } catch (err) {
+    console.error('❌ ข้อผิดพลาดในการรัน Retention Cleanup:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ==========================================
 // 8. Tasks Management

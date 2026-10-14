@@ -160,6 +160,44 @@ export async function getAzureBlobStream(blobKey) {
 }
 
 /**
+ * Delete a blob from Azure Blob Storage
+ * @param {string} blobKey - e.g. "photos/12345_test.jpg" or full URL or relative URL
+ * @returns {Promise<boolean>}
+ */
+export async function deleteAzureBlob(blobKey) {
+  if (!blobKey) return false;
+  const container = await getContainerClient();
+  if (!container) return false;
+
+  try {
+    let cleanKey = String(blobKey).replace(/https?:\/\/[^\/]+\.blob\.core\.windows\.net\/[^\/]+\//i, '');
+    cleanKey = cleanKey.replace(/^\/?(api\/images\/)?/, '');
+
+    let blockBlobClient = container.getBlockBlobClient(cleanKey);
+    let exists = await blockBlobClient.exists();
+
+    if (!exists && !cleanKey.startsWith('photos/')) {
+      const withPhotosKey = `photos/${cleanKey}`;
+      const altClient = container.getBlockBlobClient(withPhotosKey);
+      if (await altClient.exists()) {
+        blockBlobClient = altClient;
+        exists = true;
+      }
+    }
+
+    if (exists) {
+      await blockBlobClient.delete();
+      console.log(`🗑️ ลบไฟล์จาก Azure Blob สำเร็จ: ${cleanKey}`);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn(`⚠️ ไม่สามารถลบไฟล์จาก Azure Blob (${blobKey}):`, err.message);
+    return false;
+  }
+}
+
+/**
  * Get Storage Information for Health Check
  */
 export function getStorageInfo() {
