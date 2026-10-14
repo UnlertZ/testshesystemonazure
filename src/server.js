@@ -1002,6 +1002,154 @@ app.post('/api/inspections', async (req, res) => {
   }
 });
 
+app.put('/api/inspections/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { inspection_date, inspector_name } = req.body;
+    const now = new Date().toISOString();
+
+    await query(`
+      UPDATE dbo.inspections SET
+        inspection_date = COALESCE(@inspection_date, inspection_date),
+        inspector_name = COALESCE(@inspector_name, inspector_name)
+      WHERE id = @id
+    `, { id, inspection_date, inspector_name });
+
+    // Update equipment latest inspection date if this was the latest
+    const inspRes = await query('SELECT TOP 1 equipment_id FROM dbo.inspections WHERE id = @id', { id });
+    if (inspRes.recordset && inspRes.recordset[0]) {
+      const eqId = inspRes.recordset[0].equipment_id;
+      const latestRes = await query(`
+        SELECT TOP 1 inspection_date, inspector_name 
+        FROM dbo.inspections 
+        WHERE equipment_id = @eqId 
+        ORDER BY inspection_date DESC
+      `, { eqId });
+
+      if (latestRes.recordset && latestRes.recordset[0]) {
+        await query(`
+          UPDATE dbo.equipment SET
+            latest_inspection_date = @latestDate,
+            latest_inspector = @latestInspector,
+            updated_at = @now
+          WHERE id = @eqId
+        `, {
+          latestDate: latestRes.recordset[0].inspection_date,
+          latestInspector: latestRes.recordset[0].inspector_name,
+          now,
+          eqId
+        });
+      }
+    }
+
+    res.json({ success: true, message: 'แก้ไขเวลาตรวจเช็คเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/inspections/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const now = new Date().toISOString();
+
+    const inspRes = await query('SELECT TOP 1 equipment_id FROM dbo.inspections WHERE id = @id', { id });
+    const eqId = inspRes.recordset?.[0]?.equipment_id;
+
+    await query('DELETE FROM dbo.inspections WHERE id = @id', { id });
+
+    if (eqId) {
+      const latestRes = await query(`
+        SELECT TOP 1 inspection_date, inspector_name 
+        FROM dbo.inspections 
+        WHERE equipment_id = @eqId 
+        ORDER BY inspection_date DESC
+      `, { eqId });
+
+      const prev = latestRes.recordset?.[0];
+      await query(`
+        UPDATE dbo.equipment SET
+          latest_inspection_date = @latestDate,
+          latest_inspector = @latestInspector,
+          updated_at = @now
+        WHERE id = @eqId
+      `, {
+        latestDate: prev ? prev.inspection_date : null,
+        latestInspector: prev ? prev.inspector_name : null,
+        now,
+        eqId
+      });
+    }
+
+    res.json({ success: true, message: 'ลบข้อมูลการตรวจเช็คเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/inspections/clear-month', async (req, res) => {
+  try {
+    const { equipment_id, year, month } = req.body;
+    const now = new Date();
+    // Thai Time UTC+7
+    const thaiNow = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+    const targetYear = year !== undefined ? Number(year) : thaiNow.getUTCFullYear();
+    const targetMonth = month !== undefined ? Number(month) : thaiNow.getUTCMonth();
+
+    const startDate = new Date(Date.UTC(targetYear, targetMonth, 1, 0, 0, 0)).toISOString();
+    const endDate = new Date(Date.UTC(targetYear, targetMonth + 1, 1, 0, 0, 0)).toISOString();
+
+    let deleteQuery = 'DELETE FROM dbo.inspections WHERE inspection_date >= @startDate AND inspection_date < @endDate';
+    const params = { startDate, endDate };
+
+    if (equipment_id) {
+      deleteQuery += ' AND equipment_id = @equipment_id';
+      params.equipment_id = equipment_id;
+    }
+
+    const delRes = await query(deleteQuery, params);
+
+    // Reset equipment status to PENDING
+    if (equipment_id) {
+      const prevLatest = await query(`
+        SELECT TOP 1 inspection_date, inspector_name
+        FROM dbo.inspections
+        WHERE equipment_id = @equipment_id
+        ORDER BY inspection_date DESC
+      `, { equipment_id });
+
+      const prev = prevLatest.recordset?.[0];
+      await query(`
+        UPDATE dbo.equipment SET
+          inspection_status = 'PENDING',
+          latest_inspection_date = @latestDate,
+          latest_inspector = @latestInspector,
+          updated_at = @now
+        WHERE id = @equipment_id
+      `, {
+        equipment_id,
+        latestDate: prev ? prev.inspection_date : null,
+        latestInspector: prev ? prev.inspector_name : null,
+        now: now.toISOString()
+      });
+    } else {
+      await query(`UPDATE dbo.equipment SET inspection_status = 'PENDING', updated_at = @now`, {
+        now: now.toISOString()
+      });
+    }
+
+    res.json({
+      success: true,
+      deletedCount: delRes.rowsAffected?.[0] || 0,
+      message: equipment_id
+        ? 'ล้างประวัติการตรวจเช็คของอุปกรณ์นี้ในรอบเดือนนี้เรียบร้อยแล้ว'
+        : 'ล้างประวัติและรีเซ็ตสถานะการตรวจเช็คของเดือนนี้ทั้งหมดเรียบร้อยแล้ว'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==========================================
 // 7. Image Upload & File Serving Endpoints
 // ==========================================
@@ -1488,6 +1636,29 @@ app.put('/api/safety-patrols/:id/status', async (req, res) => {
   }
 });
 
+app.put('/api/safety-patrols/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, patrol_date, time_range, location, description } = req.body;
+    const now = new Date().toISOString();
+
+    await query(`
+      UPDATE dbo.safety_patrols SET
+        title = COALESCE(@title, title),
+        patrol_date = COALESCE(@patrol_date, patrol_date),
+        time_range = COALESCE(@time_range, time_range),
+        location = COALESCE(@location, location),
+        description = COALESCE(@description, description),
+        updated_at = @now
+      WHERE id = @id
+    `, { id, title, patrol_date, time_range, location, description, now });
+
+    res.json({ success: true, message: 'แก้ไขข้อมูลรอบเดินตรวจเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/safety-patrols/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1662,6 +1833,30 @@ app.put('/api/safety-findings/:id/review', async (req, res) => {
     }
 
     res.json({ success: true, status: newStatus });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/safety-findings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { category, sub_type, location, description, recommendation, photo_url } = req.body;
+    const now = new Date().toISOString();
+
+    await query(`
+      UPDATE dbo.safety_findings SET
+        category = COALESCE(@category, category),
+        sub_type = COALESCE(@sub_type, sub_type),
+        location = COALESCE(@location, location),
+        description = COALESCE(@description, description),
+        recommendation = COALESCE(@recommendation, recommendation),
+        photo_url = COALESCE(@photo_url, photo_url),
+        updated_at = @now
+      WHERE id = @id
+    `, { id, category, sub_type, location, description, recommendation, photo_url, now });
+
+    res.json({ success: true, message: 'แก้ไขข้อมูลรายการตรวจ คปอ. เรียบร้อยแล้ว' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
