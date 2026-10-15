@@ -1234,6 +1234,28 @@ app.get('/api/images/*', async (req, res) => {
       return res.sendFile(filePath);
     }
 
+    // 3. Fallback: ลองดึงจาก Remote Cloudflare Worker หรือ Public Azure Blob
+    try {
+      const remoteCandidates = [
+        `https://she-inspection-backend.b-phatcharapong2001.workers.dev/api/images/${subPath}`,
+        `https://picshesystem.blob.core.windows.net/picshesystem/${subPath}`
+      ];
+      for (const rUrl of remoteCandidates) {
+        try {
+          const resp = await fetch(rUrl, { signal: AbortSignal.timeout(4000) });
+          if (resp.ok) {
+            const cType = resp.headers.get('content-type');
+            if (cType && cType.startsWith('image/')) {
+              res.setHeader('Content-Type', cType);
+              res.setHeader('Cache-Control', 'public, max-age=31536000');
+              const arrayBuffer = await resp.arrayBuffer();
+              return res.send(Buffer.from(arrayBuffer));
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+
     res.status(404).send('Image Not Found in Azure Blob Storage or Local Cache');
   } catch (err) {
     res.status(500).send('Error loading image');
