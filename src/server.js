@@ -25,17 +25,55 @@ const PORT = process.env.PORT || 8787;
  * Helper: Insert notification into database
  */
 async function insertNotification({ id, recipient_user_id, target_role, sender_name, title, message, type = 'SYSTEM', created_at }) {
-  const notifId = id || `notif_${Date.now()}`;
+  const cleanTitle = (title || '').trim();
+  const cleanRecipient = recipient_user_id || null;
+  const cleanTargetRole = target_role || null;
   const now = created_at || new Date().toISOString();
+
+  // Guard against duplicate insertion within 90 seconds for same recipient/role and title
+  try {
+    const recentRes = await query(`
+      SELECT TOP 30 id, recipient_user_id, target_role, title, message, created_at
+      FROM dbo.notifications
+      ORDER BY created_at DESC
+    `);
+    const recentList = recentRes.recordset || [];
+    const nowDate = new Date(now).getTime();
+
+    const dup = recentList.find((r) => {
+      const rTime = new Date(r.created_at).getTime();
+      const isTimeClose = Math.abs(nowDate - rTime) < 90000;
+      if (!isTimeClose) return false;
+
+      const sameRecipient = (r.recipient_user_id || '') === (cleanRecipient || '');
+      const sameRole = (r.target_role || '') === (cleanTargetRole || '');
+
+      const rTitle = (r.title || '').trim();
+      const sameTitle =
+        rTitle === cleanTitle ||
+        (rTitle.length > 6 && cleanTitle.length > 6 && (rTitle.includes(cleanTitle) || cleanTitle.includes(rTitle)));
+
+      return (sameRecipient || sameRole) && sameTitle;
+    });
+
+    if (dup) {
+      console.log(`ℹ️ ตรวจพบแจ้งเตือนซ้ำในระยะเวลา 90 วิ: "${cleanTitle}" (ข้ามการบันทึกซ้ำ ID: ${dup.id})`);
+      return dup.id;
+    }
+  } catch (checkErr) {
+    // If check fails, continue to insert normally
+  }
+
+  const notifId = id || `notif_${Date.now()}`;
   await query(`
     INSERT INTO dbo.notifications (id, recipient_user_id, target_role, sender_name, title, message, type, is_read, created_at)
     VALUES (@id, @recipient_user_id, @target_role, @sender_name, @title, @message, @type, 0, @created_at)
   `, {
     id: notifId,
-    recipient_user_id: recipient_user_id || null,
-    target_role: target_role || null,
+    recipient_user_id: cleanRecipient,
+    target_role: cleanTargetRole,
     sender_name: sender_name || 'SHE System',
-    title: title || '',
+    title: cleanTitle,
     message: message || '',
     type: type || 'SYSTEM',
     created_at: now
@@ -1631,15 +1669,19 @@ app.get('/api/notifications', async (req, res) => {
 
     for (const n of rawList) {
       const isDuplicate = deduplicated.some((existing) => {
-        if (existing.recipient_user_id === n.recipient_user_id && existing.title === n.title && existing.message === n.message) {
-          return true;
-        }
-        if (
-          existing.recipient_user_id === n.recipient_user_id &&
-          existing.title === n.title &&
-          Math.abs(new Date(existing.created_at).getTime() - new Date(n.created_at).getTime()) < 60000
-        ) {
-          return true;
+        const sameRecipient = (existing.recipient_user_id || '') === (n.recipient_user_id || '');
+        const sameRole = (existing.target_role || '') === (n.target_role || '');
+        const titleA = (existing.title || '').trim();
+        const titleB = (n.title || '').trim();
+        const sameTitle =
+          titleA === titleB ||
+          (titleA.length > 6 && titleB.length > 6 && (titleA.includes(titleB) || titleB.includes(titleA)));
+
+        if ((sameRecipient || sameRole) && sameTitle) {
+          const diffMs = Math.abs(new Date(existing.created_at).getTime() - new Date(n.created_at).getTime());
+          if (diffMs < 120000) {
+            return true;
+          }
         }
         return false;
       });
