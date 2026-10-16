@@ -7,13 +7,12 @@
   "id": "/",
   "display": "standalone",
   "display_override": [
-    "window-controls-overlay",
     "standalone",
     "minimal-ui"
   ],
   "orientation": "any",
   "background_color": "#FCF9F4",
-  "theme_color": "#3F3A31",
+  "theme_color": "#FCF9F4",
   "lang": "th",
   "dir": "ltr",
   "categories": [
