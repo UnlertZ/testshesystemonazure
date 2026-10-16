@@ -79,9 +79,16 @@ BEGIN
         defect_status VARCHAR(50) NOT NULL DEFAULT 'NORMAL', -- 'NORMAL', 'DEFECT', 'RESOLVED'
         defect_notes NVARCHAR(MAX) NULL,           -- รายละเอียดความผิดปกติ
         defect_photo NVARCHAR(MAX) NULL,           -- URL รูปความผิดปกติ
+        usage_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE', -- 'ACTIVE', 'INACTIVE'
         created_at NVARCHAR(50) NOT NULL,
         updated_at NVARCHAR(50) NOT NULL
     );
+END;
+
+-- Ensure usage_status column exists if table was already created
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.equipment') AND name = 'usage_status')
+BEGIN
+    ALTER TABLE dbo.equipment ADD usage_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
 END;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_equipment_type_seq' AND object_id = OBJECT_ID('dbo.equipment'))

@@ -753,6 +753,7 @@ app.post('/api/equipment/bulk', async (req, res) => {
         ready_status: item.ready_status || 'READY',
         inspection_status: item.inspection_status || 'PENDING',
         responsible_person: item.responsible_person || '',
+        usage_status: item.usage_status || 'ACTIVE',
         defect_status: item.defect_status || 'NORMAL',
         defect_notes: '',
         created_at: now,
@@ -763,11 +764,11 @@ app.post('/api/equipment/bulk', async (req, res) => {
         INSERT INTO dbo.equipment (
           id, type, code, sequence_number, category, weight, location, in_service_date,
           inspection_sheet_photo, location_photo, ready_status, inspection_status,
-          responsible_person, defect_status, defect_notes, created_at, updated_at
+          responsible_person, defect_status, defect_notes, usage_status, created_at, updated_at
         ) VALUES (
           @id, @type, @code, @sequence_number, @category, @weight, @location, @in_service_date,
           @inspection_sheet_photo, @location_photo, @ready_status, @inspection_status,
-          @responsible_person, @defect_status, @defect_notes, @created_at, @updated_at
+          @responsible_person, @defect_status, @defect_notes, @usage_status, @created_at, @updated_at
         )
       `, newEquip);
 
@@ -802,11 +803,11 @@ app.post('/api/equipment', async (req, res) => {
       INSERT INTO dbo.equipment (
         id, type, code, sequence_number, category, weight, location, in_service_date,
         inspection_sheet_photo, location_photo, ready_status, inspection_status,
-        responsible_person, defect_status, defect_notes, created_at, updated_at
+        responsible_person, defect_status, defect_notes, usage_status, created_at, updated_at
       ) VALUES (
         @id, @type, @code, @sequence_number, @category, @weight, @location, @in_service_date,
         @inspection_sheet_photo, @location_photo, 'READY', 'PENDING',
-        @responsible_person, 'NORMAL', '', @created_at, @updated_at
+        @responsible_person, 'NORMAL', '', @usage_status, @created_at, @updated_at
       )
     `, {
       id,
@@ -820,6 +821,7 @@ app.post('/api/equipment', async (req, res) => {
       inspection_sheet_photo: data.inspection_sheet_photo || '',
       location_photo: data.location_photo || '',
       responsible_person: data.responsible_person || '',
+      usage_status: data.usage_status || 'ACTIVE',
       created_at: now,
       updated_at: now
     });
@@ -838,28 +840,48 @@ app.put('/api/equipment/:id', async (req, res) => {
 
     await query(`
       UPDATE dbo.equipment SET
-        category = @category,
-        weight = @weight,
-        location = @location,
-        in_service_date = @in_service_date,
+        category = COALESCE(@category, category),
+        weight = COALESCE(@weight, weight),
+        location = COALESCE(@location, location),
+        in_service_date = COALESCE(@in_service_date, in_service_date),
         inspection_sheet_photo = COALESCE(@inspection_sheet_photo, inspection_sheet_photo),
         location_photo = COALESCE(@location_photo, location_photo),
-        responsible_person = @responsible_person,
+        responsible_person = COALESCE(@responsible_person, responsible_person),
+        usage_status = COALESCE(@usage_status, usage_status),
         updated_at = @now
       WHERE id = @id
     `, {
-      category: data.category || '',
-      weight: data.weight || '',
-      location: data.location || '',
-      in_service_date: data.in_service_date || '',
+      category: data.category !== undefined ? data.category : null,
+      weight: data.weight !== undefined ? data.weight : null,
+      location: data.location !== undefined ? data.location : null,
+      in_service_date: data.in_service_date !== undefined ? data.in_service_date : null,
       inspection_sheet_photo: data.inspection_sheet_photo || null,
       location_photo: data.location_photo || null,
-      responsible_person: data.responsible_person || '',
+      responsible_person: data.responsible_person !== undefined ? data.responsible_person : null,
+      usage_status: data.usage_status !== undefined ? data.usage_status : null,
       now,
       id
     });
 
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/equipment/:id/usage-status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { usage_status } = req.body;
+    const now = new Date().toISOString();
+    const status = usage_status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    await query(`
+      UPDATE dbo.equipment SET
+        usage_status = @status,
+        updated_at = @now
+      WHERE id = @id
+    `, { status, now, id });
+    res.json({ success: true, usage_status: status });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2099,6 +2121,19 @@ async function start() {
       `);
     } catch (e) {
       console.log('User schema column check notice:', e.message);
+    }
+
+    // Ensure usage_status column exists on dbo.equipment
+    try {
+      await query(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.equipment') AND name = 'usage_status')
+        BEGIN
+          ALTER TABLE dbo.equipment ADD usage_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+        END;
+      `);
+      console.log('✅ ตรวจสอบคอลัมน์ usage_status ใน dbo.equipment เรียบร้อย');
+    } catch (e) {
+      console.log('Equipment schema column check notice:', e.message);
     }
 
     // De-duplicate users table if duplicate records exist for the same username
