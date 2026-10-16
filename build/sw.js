@@ -3,7 +3,7 @@
  * Comprehensive PWA Service Worker for Offline Support & Asset Caching
  */
 
-const CACHE_VERSION = 'she-system-v1.0.0';
+const CACHE_VERSION = 'she-system-v1.0.1';
 const STATIC_CACHE = `she-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `she-dynamic-${CACHE_VERSION}`;
 const IMMUTABLE_CACHE = `she-immutable-${CACHE_VERSION}`;
