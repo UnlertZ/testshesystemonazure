@@ -161,7 +161,7 @@ BEGIN
     CREATE TABLE dbo.notifications (
         id VARCHAR(50) NOT NULL PRIMARY KEY,
         recipient_user_id VARCHAR(50) NULL,       -- specific user ID, or NULL for broadcast
-        target_role VARCHAR(20) NULL,             -- 'ALL', 'P1', 'P2', 'P3', 'P4'
+        target_role VARCHAR(50) NULL,             -- 'ALL', 'P1', 'P2', 'P3', 'P4', 'SAFETY_COMMITTEE'
         sender_name NVARCHAR(255) NOT NULL,
         title NVARCHAR(255) NOT NULL,
         message NVARCHAR(MAX) NOT NULL,

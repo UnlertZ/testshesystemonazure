@@ -1608,7 +1608,18 @@ app.get('/api/notifications', async (req, res) => {
     const result = await query(`
       SELECT TOP 50 n.* FROM dbo.notifications n
       WHERE (n.recipient_user_id = @userId OR n.recipient_user_id IS NULL)
-        AND (n.target_role IS NULL OR n.target_role = 'ALL' OR n.target_role = @role)
+        AND (
+          n.target_role IS NULL 
+          OR n.target_role = 'ALL' 
+          OR n.target_role = @role
+          OR (
+            n.target_role = 'SAFETY_COMMITTEE'
+            AND EXISTS (
+              SELECT 1 FROM dbo.users u
+              WHERE u.id = @userId AND u.is_safety_committee = 1
+            )
+          )
+        )
         AND n.id NOT IN (
           SELECT notification_id FROM dbo.user_dismissed_notifications WHERE user_id = @userId
         )
@@ -1806,7 +1817,7 @@ app.post('/api/safety-patrols', async (req, res) => {
     });
 
     await insertNotification({
-      target_role: 'ALL',
+      target_role: 'SAFETY_COMMITTEE',
       sender_name: data.created_by_name || 'แอดมิน คปอ.',
       title: 'เปิดรอบเดินตรวจ คปอ. ใหม่',
       message: `มีรายการเดินตรวจ คปอ. วันที่ ${data.patrol_date} (${timeRange}) สมาชิก คปอ. สามารถกดเข้าร่วมเพื่อบันทึกข้อมูลได้แล้ว`,
@@ -2182,6 +2193,34 @@ async function start() {
       console.log('✅ ตรวจสอบและแปลง URL รูปภาพในฐานข้อมูล Azure SQL เรียบร้อย');
     } catch (e) {
       console.log('Photo URL normalization notice:', e.message);
+    }
+
+    // Ensure notifications table target_role column can hold 'SAFETY_COMMITTEE'
+    try {
+      await query(`
+        IF EXISTS (
+          SELECT 1 FROM sys.columns 
+          WHERE object_id = OBJECT_ID('dbo.notifications') 
+            AND name = 'target_role' 
+            AND max_length < 50
+        )
+        BEGIN
+          ALTER TABLE dbo.notifications ALTER COLUMN target_role VARCHAR(50) NULL;
+        END
+      `);
+    } catch (e) {
+      console.log('Alter target_role column notice:', e.message);
+    }
+
+    // Update existing safety committee patrol notifications to SAFETY_COMMITTEE target_role
+    try {
+      await query(`
+        UPDATE dbo.notifications
+        SET target_role = 'SAFETY_COMMITTEE'
+        WHERE target_role = 'ALL' AND (title LIKE N'%คปอ.%' OR message LIKE N'%สมาชิก คปอ.%');
+      `);
+    } catch (e) {
+      console.log('Update safety committee notifications notice:', e.message);
     }
 
     // Start background cron jobs
