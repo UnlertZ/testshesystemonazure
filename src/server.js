@@ -74,7 +74,17 @@ app.use((req, res, next) => {
 // ==========================================
 const distDir = path.join(__dirname, '..', 'dist');
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
+  app.use(express.static(distDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('sw.js')) {
+        res.setHeader('Service-Worker-Allowed', '/');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      } else if (filePath.endsWith('manifest.json') || filePath.endsWith('manifest.webmanifest')) {
+        res.setHeader('Content-Type', 'application/manifest+json');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+      }
+    }
+  }));
 }
 
 app.get('/', (req, res) => {
