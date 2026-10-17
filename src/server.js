@@ -1810,8 +1810,45 @@ app.delete('/api/notifications/:id', async (req, res) => {
 // ==========================================
 // 10. Safety Committee (คปอ.) Endpoints
 // ==========================================
+
+/**
+ * Helper to get current Bangkok (UTC+7) date and time strings
+ */
+function getBangkokDateTime(date = new Date()) {
+  const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  const timeStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+  return { dateStr, timeStr };
+}
+
+/**
+ * Auto-close any safety patrol rounds whose scheduled end_time or extended_until has passed
+ */
+async function autoCloseExpiredPatrols() {
+  try {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const { dateStr, timeStr } = getBangkokDateTime(now);
+
+    await query(`
+      UPDATE dbo.safety_patrols
+      SET status = 'CLOSED', updated_at = @nowIso
+      WHERE status = 'OPEN'
+        AND (
+          (extended_until IS NOT NULL AND extended_until <= @nowIso)
+          OR
+          (extended_until IS NULL AND (patrol_date < @dateStr OR (patrol_date = @dateStr AND end_time <= @timeStr)))
+        )
+    `, { nowIso, dateStr, timeStr });
+  } catch (err) {
+    // Non-blocking catch
+  }
+}
+
 app.get('/api/safety-patrols', async (req, res) => {
   try {
+    // Automatically close any rounds that have reached their closing time
+    await autoCloseExpiredPatrols();
+
     const result = await query(`
       SELECT p.*,
         (SELECT COUNT(*) FROM dbo.safety_findings f WHERE f.patrol_id = p.id) as findings_count
@@ -1827,27 +1864,62 @@ app.get('/api/safety-patrols', async (req, res) => {
 app.post('/api/safety-patrols', async (req, res) => {
   try {
     const data = req.body;
+    const nowObj = new Date();
+    const now = data.created_at || nowObj.toISOString();
+    const { dateStr: todayStr, timeStr: currentTimeStr } = getBangkokDateTime(nowObj);
+
+    const patrolDate = data.patrol_date;
+    const startTime = data.start_time || '10:00';
+    const endTime = data.end_time || '11:00';
+
+    // 1. Validation: Date cannot be in the past
+    if (patrolDate < todayStr) {
+      return res.status(400).json({
+        error: 'ไม่สามารถสร้างรายการย้อนหลังได้ (วันที่ต้องเป็นปัจจุบันหรือในอนาคต)'
+      });
+    }
+
+    // 2. Validation: If today, start_time cannot be before current time (with 1-min buffer for latency)
+    if (patrolDate === todayStr) {
+      const [curH, curM] = currentTimeStr.split(':').map(Number);
+      const totalCurMins = curH * 60 + curM;
+      const [startH, startM] = startTime.split(':').map(Number);
+      const totalStartMins = startH * 60 + startM;
+
+      if (totalStartMins < totalCurMins - 1) {
+        return res.status(400).json({
+          error: `ไม่สามารถกำหนดเวลาเริ่มย้อนหลังได้ (เวลาปัจจุบัน: ${currentTimeStr} น.) ต้องกำหนดเวลาเริ่มตั้งแต่ ${currentTimeStr} น. เป็นต้นไป`
+        });
+      }
+    }
+
+    // 3. Validation: End time must be after start time
+    if (endTime <= startTime) {
+      return res.status(400).json({
+        error: 'เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มตรวจ'
+      });
+    }
+
     const id = data.id || `patrol_${Date.now()}`;
-    const now = data.created_at || new Date().toISOString();
-    const title = data.title || `เดินตรวจ คปอ ประจำวันที่ ${data.patrol_date}`;
-    const timeRange = data.time_range || `${data.start_time || '10:00'}น.-${data.end_time || '11:00'}น.`;
+    const title = data.title || `เดินตรวจ คปอ ประจำวันที่ ${patrolDate}`;
+    const timeRange = data.time_range || `${startTime}น.-${endTime}น.`;
 
     await query(`
       INSERT INTO dbo.safety_patrols (
         id, title, patrol_date, start_time, end_time, time_range,
-        location, description, status, created_by_id, created_by_name,
+        location, description, status, extended_until, created_by_id, created_by_name,
         created_at, updated_at
       ) VALUES (
         @id, @title, @patrol_date, @start_time, @end_time, @time_range,
-        @location, @description, @status, @created_by_id, @created_by_name,
+        @location, @description, @status, NULL, @created_by_id, @created_by_name,
         @created_at, @updated_at
       )
     `, {
       id,
       title,
-      patrol_date: data.patrol_date,
-      start_time: data.start_time || '10:00',
-      end_time: data.end_time || '11:00',
+      patrol_date: patrolDate,
+      start_time: startTime,
+      end_time: endTime,
       time_range: timeRange,
       location: data.location || 'ทั่วทั้งโรงงาน',
       description: data.description || '',
@@ -1862,7 +1934,7 @@ app.post('/api/safety-patrols', async (req, res) => {
       target_role: 'SAFETY_COMMITTEE',
       sender_name: data.created_by_name || 'แอดมิน คปอ.',
       title: 'เปิดรอบเดินตรวจ คปอ. ใหม่',
-      message: `มีรายการเดินตรวจ คปอ. วันที่ ${data.patrol_date} (${timeRange}) สมาชิก คปอ. สามารถกดเข้าร่วมเพื่อบันทึกข้อมูลได้แล้ว`,
+      message: `มีรายการเดินตรวจ คปอ. วันที่ ${patrolDate} (${timeRange}) สมาชิก คปอ. สามารถกดเข้าร่วมเพื่อบันทึกข้อมูลได้แล้ว`,
       type: 'SYSTEM',
       created_at: now
     });
@@ -1872,13 +1944,14 @@ app.post('/api/safety-patrols', async (req, res) => {
       patrol: {
         id,
         title,
-        patrol_date: data.patrol_date,
-        start_time: data.start_time || '10:00',
-        end_time: data.end_time || '11:00',
+        patrol_date: patrolDate,
+        start_time: startTime,
+        end_time: endTime,
         time_range: timeRange,
         location: data.location || 'ทั่วทั้งโรงงาน',
         description: data.description || '',
         status: data.status || 'OPEN',
+        extended_until: null,
         created_by_id: data.created_by_id,
         created_by_name: data.created_by_name,
         created_at: now,
@@ -1890,13 +1963,120 @@ app.post('/api/safety-patrols', async (req, res) => {
   }
 });
 
+// Admin toggle status or reopen (reopening extends for 10 minutes)
 app.put('/api/safety-patrols/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
-    const now = new Date().toISOString();
-    await query('UPDATE dbo.safety_patrols SET status = @status, updated_at = @now WHERE id = @id', { status, now, id });
-    res.json({ success: true, status });
+    const { status, extend_minutes, admin_name } = req.body;
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    if (status === 'OPEN') {
+      const minutes = parseInt(extend_minutes || 10, 10);
+      const extendUntilDate = new Date(now.getTime() + minutes * 60 * 1000);
+      const extendedUntil = extendUntilDate.toISOString();
+      const { timeStr: extendTimeStr } = getBangkokDateTime(extendUntilDate);
+
+      const patRes = await query('SELECT * FROM dbo.safety_patrols WHERE id = @id', { id });
+      const patrol = patRes.recordset?.[0];
+      const newEndTime = extendTimeStr;
+      const newTimeRange = patrol ? `${patrol.start_time}น.-${newEndTime}น. (เปิดต่อ ${minutes} นาที)` : undefined;
+
+      await query(`
+        UPDATE dbo.safety_patrols SET
+          status = 'OPEN',
+          extended_until = @extendedUntil,
+          end_time = COALESCE(@newEndTime, end_time),
+          time_range = COALESCE(@newTimeRange, time_range),
+          updated_at = @nowIso
+        WHERE id = @id
+      `, { extendedUntil, newEndTime, newTimeRange, nowIso, id });
+
+      if (patrol) {
+        await insertNotification({
+          target_role: 'SAFETY_COMMITTEE',
+          sender_name: admin_name || 'แอดมิน คปอ.',
+          title: 'เปิดรับข้อมูล คปอ. ต่อเวลา (+10 นาที)',
+          message: `แอดมินเปิดรับข้อมูลต่อสำหรับ "${patrol.title}" อีก ${minutes} นาที (ปิดรับข้อมูลอัตโนมัติเวลา ${newEndTime} น.) สมาชิกสามารถเข้าร่วมบันทึกข้อมูลได้`,
+          type: 'SYSTEM',
+          created_at: nowIso
+        });
+      }
+
+      return res.json({
+        success: true,
+        status: 'OPEN',
+        extended_until: extendedUntil,
+        end_time: newEndTime,
+        time_range: newTimeRange
+      });
+    } else {
+      await query(`
+        UPDATE dbo.safety_patrols SET
+          status = 'CLOSED',
+          extended_until = NULL,
+          updated_at = @nowIso
+        WHERE id = @id
+      `, { nowIso, id });
+
+      return res.json({ success: true, status: 'CLOSED' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin explicitly extend patrol round for 10 minutes
+app.post('/api/safety-patrols/:id/extend', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const minutes = parseInt(req.body?.minutes || 10, 10);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const extendUntilDate = new Date(now.getTime() + minutes * 60 * 1000);
+    const extendedUntil = extendUntilDate.toISOString();
+    const { timeStr: extendTimeStr } = getBangkokDateTime(extendUntilDate);
+
+    const patRes = await query('SELECT * FROM dbo.safety_patrols WHERE id = @id', { id });
+    const patrol = patRes.recordset?.[0];
+    if (!patrol) {
+      return res.status(404).json({ error: 'ไม่พบรายการเดินตรวจ คปอ.' });
+    }
+
+    const newTimeRange = `${patrol.start_time}น.-${extendTimeStr}น. (เปิดต่อ ${minutes} นาที)`;
+
+    await query(`
+      UPDATE dbo.safety_patrols SET
+        status = 'OPEN',
+        extended_until = @extendedUntil,
+        end_time = @extendTimeStr,
+        time_range = @newTimeRange,
+        updated_at = @nowIso
+      WHERE id = @id
+    `, {
+      id,
+      extendedUntil,
+      extendTimeStr,
+      newTimeRange,
+      nowIso
+    });
+
+    await insertNotification({
+      target_role: 'SAFETY_COMMITTEE',
+      sender_name: req.body?.admin_name || 'แอดมิน คปอ.',
+      title: 'เปิดรับข้อมูล คปอ. ต่อเวลา (+10 นาที)',
+      message: `แอดมินเปิดรับข้อมูลต่อสำหรับ "${patrol.title}" อีก ${minutes} นาที (ปิดรับข้อมูลอัตโนมัติเวลา ${extendTimeStr} น.) สมาชิกสามารถเข้าร่วมบันทึกข้อมูลได้`,
+      type: 'SYSTEM',
+      created_at: nowIso
+    });
+
+    res.json({
+      success: true,
+      status: 'OPEN',
+      extended_until: extendedUntil,
+      end_time: extendTimeStr,
+      time_range: newTimeRange
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1962,7 +2142,27 @@ app.post('/api/safety-findings', async (req, res) => {
   try {
     const data = req.body;
     const id = data.id || `find_${Date.now()}`;
-    const now = data.created_at || new Date().toISOString();
+    const nowObj = new Date();
+    const now = data.created_at || nowObj.toISOString();
+
+    // Verify target safety patrol is currently open and not expired
+    if (data.patrol_id) {
+      const patrolRes = await query('SELECT * FROM dbo.safety_patrols WHERE id = @patrolId', { patrolId: data.patrol_id });
+      const patrol = patrolRes.recordset?.[0];
+      if (patrol) {
+        const { dateStr, timeStr } = getBangkokDateTime(nowObj);
+        const isExpired = patrol.extended_until
+          ? patrol.extended_until <= now
+          : (patrol.patrol_date < dateStr || (patrol.patrol_date === dateStr && patrol.end_time <= timeStr));
+
+        if (patrol.status === 'CLOSED' || isExpired) {
+          if (patrol.status === 'OPEN' && isExpired) {
+            await query('UPDATE dbo.safety_patrols SET status = \'CLOSED\', updated_at = @now WHERE id = @id', { now, id: patrol.id });
+          }
+          return res.status(400).json({ error: 'รอบเดินตรวจ คปอ. นี้ปิดรับข้อมูลแล้ว ไม่สามารถบันทึกข้อมูลเพิ่มเติมได้' });
+        }
+      }
+    }
 
     const isRecommend = data.category === 'RECOMMEND';
     const defaultStatus = isRecommend ? 'PENDING_ACTION' : 'COMMENDED';
@@ -2263,6 +2463,23 @@ async function start() {
       `);
     } catch (e) {
       console.log('Update safety committee notifications notice:', e.message);
+    }
+
+    // Ensure safety_patrols table has extended_until column
+    try {
+      await query(`
+        IF NOT EXISTS (
+          SELECT 1 FROM sys.columns 
+          WHERE object_id = OBJECT_ID('dbo.safety_patrols') 
+            AND name = 'extended_until'
+        )
+        BEGIN
+          ALTER TABLE dbo.safety_patrols ADD extended_until NVARCHAR(50) NULL;
+        END
+      `);
+      console.log('✅ ตรวจสอบและตั้งค่าคอลัมน์ extended_until ในตาราง safety_patrols เรียบร้อย');
+    } catch (e) {
+      console.log('Alter extended_until column notice:', e.message);
     }
 
     // Start background cron jobs

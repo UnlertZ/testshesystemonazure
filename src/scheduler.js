@@ -141,9 +141,39 @@ export async function runYearlyCleanup() {
 }
 
 /**
+ * Auto-close any safety patrol rounds whose scheduled end_time or extended_until has passed
+ */
+export async function runAutoCloseSafetyPatrols() {
+  try {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const timeStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false }).format(now);
+
+    const result = await query(`
+      UPDATE dbo.safety_patrols
+      SET status = 'CLOSED', updated_at = @nowIso
+      WHERE status = 'OPEN'
+        AND (
+          (extended_until IS NOT NULL AND extended_until <= @nowIso)
+          OR
+          (extended_until IS NULL AND (patrol_date < @dateStr OR (patrol_date = @dateStr AND end_time <= @timeStr)))
+        )
+    `, { nowIso, dateStr, timeStr });
+
+    if (result.rowsAffected && result.rowsAffected[0] > 0) {
+      console.log(`🔒 [CRON] ปิดรอบเดินตรวจ คปอ. ที่หมดเวลาเรียบร้อยแล้ว: ${result.rowsAffected[0]} รายการ`);
+    }
+  } catch (err) {
+    // Table might not exist yet during startup or transient DB issue
+  }
+}
+
+/**
  * Initialize cron scheduled triggers
  * 1. Monthly Reset: Run at 00:00 on the 1st day of every month (Thai Time UTC+7)
  * 2. 2-Year Retention Purge: Runs at 02:00 on the 1st day of every month
+ * 3. Auto-close expired Safety Committee patrol rounds: Every 30 seconds
  */
 export function startScheduler() {
   // Check every hour whether it is 00:00 Thai Time on day 1
@@ -164,5 +194,18 @@ export function startScheduler() {
     }
   });
 
-  console.log('⏰ ระบบ Scheduler (Monthly Reset & 2-Year Retention Cleanup) เริ่มทำงานแล้ว');
+  // Check and auto-close expired Safety Committee patrols every minute
+  cron.schedule('* * * * *', async () => {
+    await runAutoCloseSafetyPatrols();
+  });
+
+  // High-precision 30-second interval check for responsive closing
+  setInterval(() => {
+    runAutoCloseSafetyPatrols();
+  }, 30000);
+
+  // Initial immediate run on server boot
+  runAutoCloseSafetyPatrols();
+
+  console.log('⏰ ระบบ Scheduler (Monthly Reset, 2-Year Purge & Auto-close คปอ.) เริ่มทำงานแล้ว');
 }

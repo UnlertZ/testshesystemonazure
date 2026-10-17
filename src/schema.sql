@@ -211,11 +211,18 @@ BEGIN
         location NVARCHAR(255) NULL,
         description NVARCHAR(MAX) NULL,
         status VARCHAR(50) NOT NULL DEFAULT 'OPEN', -- 'OPEN', 'CLOSED'
+        extended_until NVARCHAR(50) NULL,           -- ISO timestamp for temporary extension (+10 mins)
         created_by_id VARCHAR(50) NOT NULL,
         created_by_name NVARCHAR(255) NOT NULL,
         created_at NVARCHAR(50) NOT NULL,
         updated_at NVARCHAR(50) NOT NULL
     );
+END;
+
+-- Ensure extended_until column exists if table was already created
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.safety_patrols') AND name = 'extended_until')
+BEGIN
+    ALTER TABLE dbo.safety_patrols ADD extended_until NVARCHAR(50) NULL;
 END;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_patrols_date' AND object_id = OBJECT_ID('dbo.safety_patrols'))
