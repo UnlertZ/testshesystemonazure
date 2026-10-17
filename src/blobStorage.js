@@ -28,7 +28,6 @@ const SAS_TOKEN = process.env.AZURE_STORAGE_SAS_TOKEN || '';
 
 let blobServiceClient = null;
 let containerClient = null;
-let isInitialized = false;
 
 /**
  * Check if Azure Blob Storage has configuration available
@@ -79,7 +78,6 @@ export async function getContainerClient() {
       console.log(`ℹ️ Azure Blob Storage: ใช้ Container "${CONTAINER_NAME}" (${createErr.message.includes('ContainerAlreadyExists') ? 'มีอยู่แล้ว' : createErr.message})`);
     }
 
-    isInitialized = true;
     return containerClient;
   } catch (err) {
     console.error('❌ ไม่สามารถเชื่อมต่อ Azure Blob Storage:', err.message);

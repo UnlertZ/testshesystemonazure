@@ -4,15 +4,14 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { query, initSchema, sql } from './db.js';
-import { startScheduler, runMonthlyReset, runYearlyCleanup, runRetentionCleanup } from './scheduler.js';
+import { query, initSchema } from './db.js';
+import { startScheduler, runMonthlyReset, runYearlyCleanup, runRetentionCleanup, runAutoCloseSafetyPatrols } from './scheduler.js';
 import {
   uploadImageToAzureBlob,
   getAzureBlobStream,
   deleteAzureBlob,
   isBlobStorageConfigured,
-  getStorageInfo,
-  getContainerClient
+  getStorageInfo
 } from './blobStorage.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -110,7 +109,10 @@ app.use((req, res, next) => {
 // ==========================================
 // 0. Root & Health Check Endpoints
 // ==========================================
-const distDir = path.join(__dirname, '..', 'dist');
+const distDir = fs.existsSync(path.join(__dirname, '..', 'dist'))
+  ? path.join(__dirname, '..', 'dist')
+  : path.join(__dirname, '..', 'build');
+
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir, {
     setHeaders: (res, filePath) => {
@@ -126,12 +128,7 @@ if (fs.existsSync(distDir)) {
 }
 
 app.get('/', (req, res) => {
-  // If frontend build exists, serve index.html
-  const indexHtmlPath = path.join(distDir, 'index.html');
-  if (fs.existsSync(indexHtmlPath)) {
-    return res.sendFile(indexHtmlPath);
-  }
-
+  // If frontend build exists, express.static already serves index.html above.
   // Otherwise, return friendly API landing page
   res.send(`
     <!DOCTYPE html>
@@ -1926,34 +1923,10 @@ function getBangkokDateTime(date = new Date()) {
   return { dateStr, timeStr };
 }
 
-/**
- * Auto-close any safety patrol rounds whose scheduled end_time or extended_until has passed
- */
-async function autoCloseExpiredPatrols() {
-  try {
-    const now = new Date();
-    const nowIso = now.toISOString();
-    const { dateStr, timeStr } = getBangkokDateTime(now);
-
-    await query(`
-      UPDATE dbo.safety_patrols
-      SET status = 'CLOSED', updated_at = @nowIso
-      WHERE status = 'OPEN'
-        AND (
-          (extended_until IS NOT NULL AND extended_until <= @nowIso)
-          OR
-          (extended_until IS NULL AND (patrol_date < @dateStr OR (patrol_date = @dateStr AND end_time <= @timeStr)))
-        )
-    `, { nowIso, dateStr, timeStr });
-  } catch (err) {
-    // Non-blocking catch
-  }
-}
-
 app.get('/api/safety-patrols', async (req, res) => {
   try {
     // Automatically close any rounds that have reached their closing time
-    await autoCloseExpiredPatrols();
+    await runAutoCloseSafetyPatrols();
 
     const result = await query(`
       SELECT p.*,
@@ -2493,31 +2466,6 @@ async function start() {
     // Optional schema setup check (non-blocking)
     initSchema().catch((e) => console.log('Schema init notice:', e.message));
 
-    // Ensure email column exists on dbo.users
-    try {
-      await query(`
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.users') AND name = 'email')
-        BEGIN
-          ALTER TABLE dbo.users ADD email NVARCHAR(255) NULL;
-        END;
-      `);
-    } catch (e) {
-      console.log('User schema column check notice:', e.message);
-    }
-
-    // Ensure usage_status column exists on dbo.equipment
-    try {
-      await query(`
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.equipment') AND name = 'usage_status')
-        BEGIN
-          ALTER TABLE dbo.equipment ADD usage_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
-        END;
-      `);
-      console.log('✅ ตรวจสอบคอลัมน์ usage_status ใน dbo.equipment เรียบร้อย');
-    } catch (e) {
-      console.log('Equipment schema column check notice:', e.message);
-    }
-
     // De-duplicate users table if duplicate records exist for the same username
     try {
       await query(`
@@ -2545,10 +2493,10 @@ async function start() {
         WHERE inspection_sheet_photo LIKE '%pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev%'
            OR location_photo LIKE '%pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev%';
 
-        UPDATE dbo.inspection_logs
-        SET inspection_sheet_photo = REPLACE(inspection_sheet_photo, 'https://pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev/', '/api/images/'),
+        UPDATE dbo.inspections
+        SET inspection_photo = REPLACE(inspection_photo, 'https://pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev/', '/api/images/'),
             location_photo = REPLACE(location_photo, 'https://pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev/', '/api/images/')
-        WHERE inspection_sheet_photo LIKE '%pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev%'
+        WHERE inspection_photo LIKE '%pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev%'
            OR location_photo LIKE '%pub-426ad5b3bf3b47f596fa63ac0ac61749.r2.dev%';
       `);
       console.log('✅ ตรวจสอบและแปลง URL รูปภาพในฐานข้อมูล Azure SQL เรียบร้อย');
@@ -2582,23 +2530,6 @@ async function start() {
       `);
     } catch (e) {
       console.log('Update safety committee notifications notice:', e.message);
-    }
-
-    // Ensure safety_patrols table has extended_until column
-    try {
-      await query(`
-        IF NOT EXISTS (
-          SELECT 1 FROM sys.columns 
-          WHERE object_id = OBJECT_ID('dbo.safety_patrols') 
-            AND name = 'extended_until'
-        )
-        BEGIN
-          ALTER TABLE dbo.safety_patrols ADD extended_until NVARCHAR(50) NULL;
-        END
-      `);
-      console.log('✅ ตรวจสอบและตั้งค่าคอลัมน์ extended_until ในตาราง safety_patrols เรียบร้อย');
-    } catch (e) {
-      console.log('Alter extended_until column notice:', e.message);
     }
 
     // Start background cron jobs

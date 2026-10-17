@@ -194,11 +194,6 @@ export function startScheduler() {
     }
   });
 
-  // Check and auto-close expired Safety Committee patrols every minute
-  cron.schedule('* * * * *', async () => {
-    await runAutoCloseSafetyPatrols();
-  });
-
   // High-precision 30-second interval check for responsive closing
   setInterval(() => {
     runAutoCloseSafetyPatrols();
