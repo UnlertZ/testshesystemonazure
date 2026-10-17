@@ -1711,6 +1711,22 @@ app.patch('/api/tasks/:id/status', async (req, res) => {
   }
 });
 
+app.delete('/api/tasks/completed', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    let queryText = 'DELETE FROM dbo.tasks WHERE status = \'COMPLETED\'';
+    const params = {};
+    if (userId) {
+      queryText += ' AND (assigned_to_id = @userId OR assigned_by_id = @userId)';
+      params.userId = userId;
+    }
+    const result = await query(queryText, params);
+    res.json({ success: true, deletedCount: result.rowsAffected?.[0] || 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/tasks/:id', async (req, res) => {
   try {
     const { id } = req.params;
