@@ -249,12 +249,61 @@ app.post('/api/departments', async (req, res) => {
 app.put('/api/departments/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name } = req.body;
+    const { name, oldName } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'กรุณากรอกชื่อแผนก' });
     }
-    await query('UPDATE dbo.departments SET name = @name WHERE id = @id', { name: name.trim(), id });
-    res.json({ success: true });
+    const newName = name.trim();
+
+    // 1. Get previous name if not explicitly provided
+    let prevName = oldName ? oldName.trim() : null;
+    if (!prevName) {
+      const currentDept = await query('SELECT name FROM dbo.departments WHERE id = @id', { id });
+      prevName = currentDept.recordset?.[0]?.name;
+    }
+
+    // 2. Update department name
+    await query('UPDATE dbo.departments SET name = @name WHERE id = @id', { name: newName, id });
+
+    // 3. Cascade update to all users and safety findings having the previous department name
+    if (prevName && prevName !== newName) {
+      const now = new Date().toISOString();
+      await query(
+        'UPDATE dbo.users SET department = @newName, updated_at = @now WHERE department = @prevName',
+        { newName, prevName, now }
+      );
+      await query(
+        'UPDATE dbo.safety_findings SET reporter_department = @newName WHERE reporter_department = @prevName',
+        { newName, prevName }
+      );
+    }
+
+    res.json({ success: true, updatedDepartment: newName, previousName: prevName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/departments/migrate', async (req, res) => {
+  try {
+    const { fromDepartment, toDepartment } = req.body;
+    if (!fromDepartment || !toDepartment) {
+      return res.status(400).json({ error: 'กรุณาระบุแผนกต้นทางและแผนกปลายทาง' });
+    }
+    const fromName = fromDepartment.trim();
+    const toName = toDepartment.trim();
+    const now = new Date().toISOString();
+
+    const userRes = await query(
+      'UPDATE dbo.users SET department = @toName, updated_at = @now WHERE department = @fromName',
+      { toName, fromName, now }
+    );
+    await query(
+      'UPDATE dbo.safety_findings SET reporter_department = @toName WHERE reporter_department = @fromName',
+      { toName, fromName }
+    );
+
+    res.json({ success: true, updatedCount: userRes.rowsAffected?.[0] || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -304,15 +353,56 @@ app.post('/api/positions', async (req, res) => {
 app.put('/api/positions/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, default_role } = req.body;
+    const { name, default_role, oldName } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'กรุณากรอกชื่อระดับ / ตำแหน่ง' });
     }
+    const newName = name.trim();
+
+    // 1. Get previous name if not explicitly provided
+    let prevName = oldName ? oldName.trim() : null;
+    if (!prevName) {
+      const currentPos = await query('SELECT name FROM dbo.positions WHERE id = @id', { id });
+      prevName = currentPos.recordset?.[0]?.name;
+    }
+
+    // 2. Update position
     await query(
       'UPDATE dbo.positions SET name = @name, default_role = @default_role WHERE id = @id',
-      { name: name.trim(), default_role: default_role || 'P1', id }
+      { name: newName, default_role: default_role || 'P1', id }
     );
-    res.json({ success: true });
+
+    // 3. Cascade update to all users having the previous position name
+    if (prevName && prevName !== newName) {
+      const now = new Date().toISOString();
+      await query(
+        'UPDATE dbo.users SET position = @newName, updated_at = @now WHERE position = @prevName',
+        { newName, prevName, now }
+      );
+    }
+
+    res.json({ success: true, updatedPosition: newName, previousName: prevName });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/positions/migrate', async (req, res) => {
+  try {
+    const { fromPosition, toPosition } = req.body;
+    if (!fromPosition || !toPosition) {
+      return res.status(400).json({ error: 'กรุณาระบุตำแหน่งต้นทางและตำแหน่งปลายทาง' });
+    }
+    const fromName = fromPosition.trim();
+    const toName = toPosition.trim();
+    const now = new Date().toISOString();
+
+    const userRes = await query(
+      'UPDATE dbo.users SET position = @toName, updated_at = @now WHERE position = @fromName',
+      { toName, fromName, now }
+    );
+
+    res.json({ success: true, updatedCount: userRes.rowsAffected?.[0] || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
