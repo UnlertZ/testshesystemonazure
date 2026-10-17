@@ -2145,12 +2145,13 @@ app.post('/api/safety-findings', async (req, res) => {
     const nowObj = new Date();
     const now = data.created_at || nowObj.toISOString();
 
-    // Verify target safety patrol is currently open and not expired
+    // Verify target safety patrol is currently open, not expired, and has reached start time
     if (data.patrol_id) {
       const patrolRes = await query('SELECT * FROM dbo.safety_patrols WHERE id = @patrolId', { patrolId: data.patrol_id });
       const patrol = patrolRes.recordset?.[0];
       if (patrol) {
         const { dateStr, timeStr } = getBangkokDateTime(nowObj);
+        const isExtended = Boolean(patrol.extended_until);
         const isExpired = patrol.extended_until
           ? patrol.extended_until <= now
           : (patrol.patrol_date < dateStr || (patrol.patrol_date === dateStr && patrol.end_time <= timeStr));
@@ -2160,6 +2161,18 @@ app.post('/api/safety-findings', async (req, res) => {
             await query('UPDATE dbo.safety_patrols SET status = \'CLOSED\', updated_at = @now WHERE id = @id', { now, id: patrol.id });
           }
           return res.status(400).json({ error: 'รอบเดินตรวจ คปอ. นี้ปิดรับข้อมูลแล้ว ไม่สามารถบันทึกข้อมูลเพิ่มเติมได้' });
+        }
+
+        // Check if patrol has not reached start time yet (locked)
+        const isUpcoming = !isExtended && (
+          patrol.patrol_date > dateStr ||
+          (patrol.patrol_date === dateStr && patrol.start_time > timeStr)
+        );
+
+        if (isUpcoming) {
+          return res.status(400).json({
+            error: `รอบเดินตรวจ คปอ. นี้ยังไม่ถึงเวลาเริ่ม (เริ่มเวลา ${patrol.start_time} น.)`
+          });
         }
       }
     }
