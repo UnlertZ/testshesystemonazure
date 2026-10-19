@@ -23,8 +23,8 @@ export async function runMonthlyReset() {
 
     console.log(`⏰ [CRON] กำลังรันรอบรีเซ็ตประจำเดือน: ${monthName} ${yearBE}...`);
 
-    // Reset equipment status
-    await query("UPDATE dbo.equipment SET inspection_status = 'PENDING'");
+    // Reset equipment status (เฉพาะอุปกรณ์ที่ใช้งานอยู่ ไม่รีเซ็ตอุปกรณ์ที่ยกเลิกการใช้งาน)
+    await query("UPDATE dbo.equipment SET inspection_status = 'PENDING' WHERE usage_status = 'ACTIVE' OR usage_status IS NULL");
 
     const notifMsg = `เริ่มตรวจอุปกรณ์ดับเพลิงประจำรอบเดือน${monthName} ${yearBE} ได้แล้ว`;
     const notifId = `notif_cron_${Date.now()}`;

@@ -1322,7 +1322,7 @@ app.post('/api/inspections/clear-month', async (req, res) => {
         now: now.toISOString()
       });
     } else {
-      await query(`UPDATE dbo.equipment SET inspection_status = 'PENDING', updated_at = @now`, {
+      await query(`UPDATE dbo.equipment SET inspection_status = 'PENDING', updated_at = @now WHERE usage_status = 'ACTIVE' OR usage_status IS NULL`, {
         now: now.toISOString()
       });
     }
