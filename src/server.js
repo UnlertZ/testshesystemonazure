@@ -334,14 +334,18 @@ app.post('/api/positions', async (req, res) => {
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'กรุณากรอกชื่อระดับ / ตำแหน่ง' });
     }
+    const trimmedName = name.trim();
+    if (trimmedName === 'Development' || default_role === 'P4' || trimmedName.includes('ผู้จัดการระบบ')) {
+      return res.status(403).json({ error: 'ไม่สามารถสร้างตำแหน่ง Development หรือสิทธิ์ P4 เพิ่มเติมได้' });
+    }
     const id = `pos_${Date.now()}`;
     const now = new Date().toISOString();
     const role = default_role || 'P1';
     await query(
       'INSERT INTO dbo.positions (id, name, default_role, created_at) VALUES (@id, @name, @default_role, @created_at)',
-      { id, name: name.trim(), default_role: role, created_at: now }
+      { id, name: trimmedName, default_role: role, created_at: now }
     );
-    res.json({ success: true, position: { id, name: name.trim(), default_role: role, created_at: now } });
+    res.json({ success: true, position: { id, name: trimmedName, default_role: role, created_at: now } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -356,12 +360,15 @@ app.put('/api/positions/:id', async (req, res) => {
     }
     const newName = name.trim();
 
-    // 1. Get previous name if not explicitly provided
-    let prevName = oldName ? oldName.trim() : null;
-    if (!prevName) {
-      const currentPos = await query('SELECT name FROM dbo.positions WHERE id = @id', { id });
-      prevName = currentPos.recordset?.[0]?.name;
+    // Check if target position is Development or P4 system position
+    const currentPos = await query('SELECT name, default_role FROM dbo.positions WHERE id = @id', { id });
+    const existingPos = currentPos.recordset?.[0];
+    if (existingPos && (existingPos.name === 'Development' || existingPos.default_role === 'P4' || existingPos.name.includes('ผู้จัดการระบบ'))) {
+      return res.status(403).json({ error: 'ไม่สามารถแก้ไขตำแหน่ง Development (สิทธิ์ P4 ของ Super Admin) ได้' });
     }
+
+    // 1. Get previous name if not explicitly provided
+    let prevName = oldName ? oldName.trim() : existingPos?.name;
 
     // 2. Update position
     await query(
@@ -408,6 +415,12 @@ app.post('/api/positions/migrate', async (req, res) => {
 app.delete('/api/positions/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const currentPos = await query('SELECT name, default_role FROM dbo.positions WHERE id = @id', { id });
+    const existingPos = currentPos.recordset?.[0];
+    if (existingPos && (existingPos.name === 'Development' || existingPos.default_role === 'P4' || existingPos.name.includes('ผู้จัดการระบบ'))) {
+      return res.status(403).json({ error: 'ไม่สามารถลบตำแหน่ง Development (สิทธิ์ P4 ของ Super Admin) ได้' });
+    }
+
     await query('DELETE FROM dbo.positions WHERE id = @id', { id });
     res.json({ success: true });
   } catch (err) {
@@ -570,6 +583,9 @@ app.get('/api/users', async (req, res) => {
 app.post('/api/users', async (req, res) => {
   try {
     const data = req.body;
+    if (data.position === 'Development' || data.role === 'P4' || (data.position && data.position.includes('ผู้จัดการระบบ'))) {
+      return res.status(403).json({ error: 'ไม่สามารถเพิ่มสมาชิกในตำแหน่ง Development หรือสิทธิ์ P4 ได้' });
+    }
     const id = `u_${Date.now()}`;
     const now = new Date().toISOString();
 
@@ -2530,6 +2546,28 @@ async function start() {
       `);
     } catch (e) {
       console.log('Update safety committee notifications notice:', e.message);
+    }
+
+    // Ensure position 'Development' exists and 'ผู้จัดการระบบ (IT / Super Admin)' is updated
+    try {
+      await query(`
+        UPDATE dbo.positions 
+        SET name = 'Development', default_role = 'P4' 
+        WHERE name = N'ผู้จัดการระบบ (IT / Super Admin)' OR (default_role = 'P4' AND name <> 'Development');
+
+        IF NOT EXISTS (SELECT 1 FROM dbo.positions WHERE name = 'Development')
+        BEGIN
+          INSERT INTO dbo.positions (id, name, default_role, created_at)
+          VALUES ('pos_06', 'Development', 'P4', '2025-01-01T00:00:00+07:00');
+        END;
+
+        UPDATE dbo.users 
+        SET position = 'Development' 
+        WHERE role = 'P4' OR position = N'ผู้จัดการระบบ (IT / Super Admin)';
+      `);
+      console.log('✅ ตรวจสอบและอัปเดตตำแหน่ง Development (P4) เรียบร้อย');
+    } catch (e) {
+      console.log('Position Development update notice:', e.message);
     }
 
     // Start background cron jobs
