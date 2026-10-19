@@ -18,10 +18,16 @@ IF OBJECT_ID('dbo.positions', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.positions (
         id VARCHAR(50) NOT NULL PRIMARY KEY,
-        name NVARCHAR(255) NOT NULL UNIQUE,
+        name NVARCHAR(255) NOT NULL,
+        department NVARCHAR(255) NULL,
         default_role VARCHAR(20) NOT NULL, -- 'P1', 'P2', 'P3', 'P4'
         created_at NVARCHAR(50) NOT NULL
     );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.positions') AND name = 'department')
+BEGIN
+    ALTER TABLE dbo.positions ADD department NVARCHAR(255) NULL;
 END;
 
 -- 3. Users Table (ผู้ใช้งานและสิทธิ์)

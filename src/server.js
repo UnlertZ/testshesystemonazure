@@ -321,7 +321,15 @@ app.delete('/api/departments/:id', async (req, res) => {
 // ==========================================
 app.get('/api/positions', async (req, res) => {
   try {
-    const result = await query('SELECT id, name, default_role, created_at FROM dbo.positions ORDER BY created_at ASC');
+    const { department } = req.query;
+    let queryText = 'SELECT id, name, default_role, department, created_at FROM dbo.positions';
+    const params = {};
+    if (department && department !== 'ALL' && department !== 'ทั้งหมด') {
+      queryText += ' WHERE LOWER(LTRIM(RTRIM(department))) = LOWER(LTRIM(RTRIM(@department)))';
+      params.department = department;
+    }
+    queryText += ' ORDER BY created_at ASC';
+    const result = await query(queryText, params);
     res.json({ positions: result.recordset || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -330,7 +338,7 @@ app.get('/api/positions', async (req, res) => {
 
 app.post('/api/positions', async (req, res) => {
   try {
-    const { name, default_role } = req.body;
+    const { name, default_role, department } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'กรุณากรอกชื่อระดับ / ตำแหน่ง' });
     }
@@ -341,11 +349,12 @@ app.post('/api/positions', async (req, res) => {
     const id = `pos_${Date.now()}`;
     const now = new Date().toISOString();
     const role = default_role || 'P1';
+    const dept = department ? department.trim() : null;
     await query(
-      'INSERT INTO dbo.positions (id, name, default_role, created_at) VALUES (@id, @name, @default_role, @created_at)',
-      { id, name: trimmedName, default_role: role, created_at: now }
+      'INSERT INTO dbo.positions (id, name, default_role, department, created_at) VALUES (@id, @name, @default_role, @dept, @created_at)',
+      { id, name: trimmedName, default_role: role, dept, created_at: now }
     );
-    res.json({ success: true, position: { id, name: trimmedName, default_role: role, created_at: now } });
+    res.json({ success: true, position: { id, name: trimmedName, default_role: role, department: dept, created_at: now } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -354,14 +363,14 @@ app.post('/api/positions', async (req, res) => {
 app.put('/api/positions/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, default_role, oldName } = req.body;
+    const { name, default_role, department, oldName } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'กรุณากรอกชื่อระดับ / ตำแหน่ง' });
     }
     const newName = name.trim();
 
     // Check if target position is Development or P4 system position
-    const currentPos = await query('SELECT name, default_role FROM dbo.positions WHERE id = @id', { id });
+    const currentPos = await query('SELECT name, default_role, department FROM dbo.positions WHERE id = @id', { id });
     const existingPos = currentPos.recordset?.[0];
     if (existingPos && (existingPos.name === 'Development' || existingPos.default_role === 'P4' || existingPos.name.includes('ผู้จัดการระบบ'))) {
       return res.status(403).json({ error: 'ไม่สามารถแก้ไขตำแหน่ง Development (สิทธิ์ P4 ของ Super Admin) ได้' });
@@ -369,11 +378,12 @@ app.put('/api/positions/:id', async (req, res) => {
 
     // 1. Get previous name if not explicitly provided
     let prevName = oldName ? oldName.trim() : existingPos?.name;
+    const dept = department !== undefined ? (department ? department.trim() : null) : (existingPos?.department || null);
 
     // 2. Update position
     await query(
-      'UPDATE dbo.positions SET name = @name, default_role = @default_role WHERE id = @id',
-      { name: newName, default_role: default_role || 'P1', id }
+      'UPDATE dbo.positions SET name = @name, default_role = @default_role, department = @dept WHERE id = @id',
+      { name: newName, default_role: default_role || 'P1', dept, id }
     );
 
     // 3. Cascade update to all users having the previous position name
@@ -385,7 +395,7 @@ app.put('/api/positions/:id', async (req, res) => {
       );
     }
 
-    res.json({ success: true, updatedPosition: newName, previousName: prevName });
+    res.json({ success: true, updatedPosition: newName, previousName: prevName, department: dept });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2569,6 +2579,266 @@ async function start() {
     } catch (e) {
       console.log('Position Development update notice:', e.message);
     }
+
+
+    // Ensure department column exists in dbo.positions and drop single-column unique constraint on name
+    try {
+      await query(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.positions') AND name = 'department')
+        BEGIN
+          ALTER TABLE dbo.positions ADD department NVARCHAR(255) NULL;
+        END
+
+        DECLARE @sql NVARCHAR(MAX) = N'';
+        SELECT @sql = @sql + N'ALTER TABLE dbo.positions DROP CONSTRAINT ' + QUOTENAME(kc.name) + N';'
+        FROM sys.key_constraints kc
+        JOIN sys.index_columns ic ON kc.parent_object_id = ic.object_id AND kc.unique_index_id = ic.index_id
+        JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+        WHERE kc.parent_object_id = OBJECT_ID('dbo.positions')
+          AND kc.type = 'UQ'
+          AND c.name = 'name';
+        IF LEN(@sql) > 0 EXEC sp_executesql @sql;
+      `);
+      console.log('✅ ตรวจสอบโครงสร้างตาราง dbo.positions เรียบร้อย');
+    } catch (e) {
+      console.log('Positions schema update notice:', e.message);
+    }
+
+    // Seed departments into dbo.departments if missing
+    try {
+      await query(`
+        INSERT INTO dbo.departments (id, name, created_at)
+        SELECT d.id, d.name, d.created_at
+        FROM (VALUES
+          ('dept_01', N'Continuous Improvement', '2025-01-01T00:00:00+07:00'),
+          ('dept_02', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('dept_03', N'Finance Controlling', '2025-01-01T00:00:00+07:00'),
+          ('dept_04', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('dept_05', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('dept_06', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_07', N'Maintenance Admin', '2025-01-01T00:00:00+07:00'),
+          ('dept_08', N'Maintenance Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_09', N'Maintenance Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('dept_10', N'Plant Management', '2025-01-01T00:00:00+07:00'),
+          ('dept_11', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('dept_12', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('dept_13', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('dept_14', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('dept_15', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('dept_16', N'Production Admin', '2025-01-01T00:00:00+07:00'),
+          ('dept_17', N'Production Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_18', N'Production Sup', '2025-01-01T00:00:00+07:00'),
+          ('dept_19', N'Quality Admin', '2025-01-01T00:00:00+07:00'),
+          ('dept_20', N'Quality Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_21', N'Quality Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('dept_22', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('dept_23', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('dept_24', N'Utility Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_25', N'Utility Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('dept_26', N'Warehouse Admin', '2025-01-01T00:00:00+07:00'),
+          ('dept_27', N'Warehouse Office', '2025-01-01T00:00:00+07:00'),
+          ('dept_28', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00')
+        ) AS d(id, name, created_at)
+        WHERE NOT EXISTS (SELECT 1 FROM dbo.departments WHERE name = d.name);
+      `);
+      console.log('✅ ตรวจสอบและซิงค์ข้อมูลแผนก (Departments) 28 แผนกเรียบร้อย');
+    } catch (e) {
+      console.log('Departments seed notice:', e.message);
+    }
+
+    // Seed positions into dbo.positions if missing, or update department on existing
+    try {
+      await query(`
+        INSERT INTO dbo.positions (id, name, default_role, department, created_at)
+        SELECT p.id, p.name, p.default_role, p.department, p.created_at
+        FROM (VALUES
+          ('pos_001', N'CI Specialist', 'P1', N'Continuous Improvement', '2025-01-01T00:00:00+07:00'),
+          ('pos_002', N'Project Draftman', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_003', N'Project Temporary', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_004', N'Process Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_005', N'Automation Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_006', N'Engineering Manager', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_007', N'Project Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_008', N'Controlling Analyst', 'P1', N'Finance Controlling', '2025-01-01T00:00:00+07:00'),
+          ('pos_009', N'Plant Controller', 'P1', N'Finance Controlling', '2025-01-01T00:00:00+07:00'),
+          ('pos_010', N'AP Specialist', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_011', N'GL Lead', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_012', N'FEC Manager', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_013', N'Taxation Lead', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_014', N'Plant HR Manager', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_015', N'HR Supervisor', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_016', N'Facility Officer', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_017', N'ER&GA Lead', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_018', N'Logistics Officer', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_019', N'Logistics Supervisor', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_020', N'Logistics Lead', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_021', N'Maintenance Administrator', 'P1', N'Maintenance Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_022', N'Maintenance Supervisor', 'P1', N'Maintenance Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_023', N'Maintenance Leader', 'P1', N'Maintenance Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_024', N'Maintenance Technician', 'P1', N'Maintenance Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_025', N'Plant Manager', 'P1', N'Plant Management', '2025-01-01T00:00:00+07:00'),
+          ('pos_026', N'Buyer', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_027', N'Category Buyer Team Lead', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_028', N'Category Buyer', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_029', N'Mixing Shift Leader', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_030', N'Process Operator - Mixing Machine Control', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_031', N'Support - Rework', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_032', N'Process Operator - Crane Control', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_033', N'Process Operator - Premix', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_034', N'Seasonal Support - Manual Pack', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_035', N'Packing Shift leader', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_036', N'Seasonal Support - Manual Pack', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_037', N'Packing Operator - Packing Machine Control', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_038', N'Packing Operator - Packing Material Preparation', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_039', N'Production Forklift Driver', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_040', N'Packing Operator - SAP Coding', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_041', N'Support - Palletizer', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_042', N'Packing Operator - Shipper Machine Control', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_043', N'Mixing Shift Leader', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_044', N'Process Operator - Crane Control', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_045', N'Process Operator - Mixing Machine Control', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_046', N'Process Operator - Premix', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_047', N'Process Operator - Mixed Transfer', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_048', N'Process Operator - Mixing dumping RW', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_049', N'Process Operator - Mixing bulk', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_050', N'Packing Operator - Packing Machine Control', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_051', N'Support - Packing Machine', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_052', N'Packing Operator - SAP Coding', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_053', N'Packing Shift leader', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_054', N'Support - Palletizer', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_055', N'Packing Operator - Packing Material Preparation', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_056', N'Production Forklift Driver', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_057', N'Process Operator - Crane Control', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_058', N'Production Administrator', 'P1', N'Production Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_059', N'Production Manager', 'P1', N'Production Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_060', N'Production Engineer', 'P1', N'Production Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_061', N'Production Lead', 'P1', N'Production Sup', '2025-01-01T00:00:00+07:00'),
+          ('pos_062', N'Quality Analyst (Document control)', 'P1', N'Quality Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_063', N'Quality Supervisor', 'P1', N'Quality Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_064', N'Quality Manager', 'P1', N'Quality Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_065', N'Quality Assistant - Control', 'P1', N'Quality Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_066', N'Quality Assistant - Assurance', 'P1', N'Quality Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_067', N'SHE Manager', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_068', N'SHE Specialist', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_069', N'Internship', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_070', N'Material & Ingredients Planner', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_071', N'Production Planning Scheduler', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_072', N'Planning & Logistic Manager', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_073', N'Plant Initiative Lead', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_074', N'MTD/NPD Specialist', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_075', N'Planning & Logistics Lead', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_076', N'Utility Team Lead', 'P1', N'Utility Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_077', N'Utility Technician', 'P1', N'Utility Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_078', N'Warehouse Administrator', 'P1', N'Warehouse Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_079', N'Warehouse Officer', 'P1', N'Warehouse Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_080', N'Warehouse Consultant', 'P1', N'Warehouse Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_081', N'Warehouse Forklift Driver', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_082', N'Warehouse Operator', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_083', N'Warehouse Administrator', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_dev_01', N'Development', 'P4', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00')
+        ) AS p(id, name, default_role, department, created_at)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM dbo.positions 
+          WHERE name = p.name AND (department = p.department OR (department IS NULL AND p.department IS NULL))
+        );
+
+        -- Update department for any positions that have NULL department
+        UPDATE pos
+        SET pos.department = p.department
+        FROM dbo.positions pos
+        JOIN (VALUES
+          ('pos_001', N'CI Specialist', 'P1', N'Continuous Improvement', '2025-01-01T00:00:00+07:00'),
+          ('pos_002', N'Project Draftman', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_003', N'Project Temporary', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_004', N'Process Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_005', N'Automation Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_006', N'Engineering Manager', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_007', N'Project Engineer', 'P1', N'Engineering', '2025-01-01T00:00:00+07:00'),
+          ('pos_008', N'Controlling Analyst', 'P1', N'Finance Controlling', '2025-01-01T00:00:00+07:00'),
+          ('pos_009', N'Plant Controller', 'P1', N'Finance Controlling', '2025-01-01T00:00:00+07:00'),
+          ('pos_010', N'AP Specialist', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_011', N'GL Lead', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_012', N'FEC Manager', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_013', N'Taxation Lead', 'P1', N'Finance Excellence Center', '2025-01-01T00:00:00+07:00'),
+          ('pos_014', N'Plant HR Manager', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_015', N'HR Supervisor', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_016', N'Facility Officer', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_017', N'ER&GA Lead', 'P1', N'Human Resources', '2025-01-01T00:00:00+07:00'),
+          ('pos_018', N'Logistics Officer', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_019', N'Logistics Supervisor', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_020', N'Logistics Lead', 'P1', N'Logistics Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_021', N'Maintenance Administrator', 'P1', N'Maintenance Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_022', N'Maintenance Supervisor', 'P1', N'Maintenance Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_023', N'Maintenance Leader', 'P1', N'Maintenance Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_024', N'Maintenance Technician', 'P1', N'Maintenance Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_025', N'Plant Manager', 'P1', N'Plant Management', '2025-01-01T00:00:00+07:00'),
+          ('pos_026', N'Buyer', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_027', N'Category Buyer Team Lead', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_028', N'Category Buyer', 'P1', N'Procurement', '2025-01-01T00:00:00+07:00'),
+          ('pos_029', N'Mixing Shift Leader', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_030', N'Process Operator - Mixing Machine Control', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_031', N'Support - Rework', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_032', N'Process Operator - Crane Control', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_033', N'Process Operator - Premix', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_034', N'Seasonal Support - Manual Pack', 'P1', N'Production 1 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_035', N'Packing Shift leader', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_036', N'Seasonal Support - Manual Pack', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_037', N'Packing Operator - Packing Machine Control', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_038', N'Packing Operator - Packing Material Preparation', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_039', N'Production Forklift Driver', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_040', N'Packing Operator - SAP Coding', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_041', N'Support - Palletizer', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_042', N'Packing Operator - Shipper Machine Control', 'P1', N'Production 1 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_043', N'Mixing Shift Leader', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_044', N'Process Operator - Crane Control', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_045', N'Process Operator - Mixing Machine Control', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_046', N'Process Operator - Premix', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_047', N'Process Operator - Mixed Transfer', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_048', N'Process Operator - Mixing dumping RW', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_049', N'Process Operator - Mixing bulk', 'P1', N'Production 2 Mix', '2025-01-01T00:00:00+07:00'),
+          ('pos_050', N'Packing Operator - Packing Machine Control', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_051', N'Support - Packing Machine', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_052', N'Packing Operator - SAP Coding', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_053', N'Packing Shift leader', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_054', N'Support - Palletizer', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_055', N'Packing Operator - Packing Material Preparation', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_056', N'Production Forklift Driver', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_057', N'Process Operator - Crane Control', 'P1', N'Production 2 Pac', '2025-01-01T00:00:00+07:00'),
+          ('pos_058', N'Production Administrator', 'P1', N'Production Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_059', N'Production Manager', 'P1', N'Production Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_060', N'Production Engineer', 'P1', N'Production Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_061', N'Production Lead', 'P1', N'Production Sup', '2025-01-01T00:00:00+07:00'),
+          ('pos_062', N'Quality Analyst (Document control)', 'P1', N'Quality Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_063', N'Quality Supervisor', 'P1', N'Quality Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_064', N'Quality Manager', 'P1', N'Quality Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_065', N'Quality Assistant - Control', 'P1', N'Quality Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_066', N'Quality Assistant - Assurance', 'P1', N'Quality Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_067', N'SHE Manager', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_068', N'SHE Specialist', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_069', N'Internship', 'P1', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00'),
+          ('pos_070', N'Material & Ingredients Planner', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_071', N'Production Planning Scheduler', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_072', N'Planning & Logistic Manager', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_073', N'Plant Initiative Lead', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_074', N'MTD/NPD Specialist', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_075', N'Planning & Logistics Lead', 'P1', N'Supply Planning', '2025-01-01T00:00:00+07:00'),
+          ('pos_076', N'Utility Team Lead', 'P1', N'Utility Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_077', N'Utility Technician', 'P1', N'Utility Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_078', N'Warehouse Administrator', 'P1', N'Warehouse Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_079', N'Warehouse Officer', 'P1', N'Warehouse Admin', '2025-01-01T00:00:00+07:00'),
+          ('pos_080', N'Warehouse Consultant', 'P1', N'Warehouse Office', '2025-01-01T00:00:00+07:00'),
+          ('pos_081', N'Warehouse Forklift Driver', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_082', N'Warehouse Operator', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_083', N'Warehouse Administrator', 'P1', N'Warehouse Shopfloor', '2025-01-01T00:00:00+07:00'),
+          ('pos_dev_01', N'Development', 'P4', N'Safety Health & Environment', '2025-01-01T00:00:00+07:00')
+        ) AS p(id, name, default_role, department, created_at)
+        ON pos.name = p.name AND (pos.department IS NULL OR pos.department = '');
+      `);
+      console.log('✅ ตรวจสอบและซิงค์ข้อมูลตำแหน่ง (Positions) 84 ตำแหน่งเรียบร้อย');
+    } catch (e) {
+      console.log('Positions seed notice:', e.message);
+    }
+
 
     // Start background cron jobs
     startScheduler();
