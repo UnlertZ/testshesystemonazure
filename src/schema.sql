@@ -97,6 +97,14 @@ BEGIN
     ALTER TABLE dbo.equipment ADD usage_status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
 END;
 
+-- Ensure map columns exist on equipment
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.equipment') AND name = 'map_zone_id')
+BEGIN
+    ALTER TABLE dbo.equipment ADD map_zone_id NVARCHAR(100) NULL;
+    ALTER TABLE dbo.equipment ADD map_x FLOAT NULL;
+    ALTER TABLE dbo.equipment ADD map_y FLOAT NULL;
+END;
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_equipment_type_seq' AND object_id = OBJECT_ID('dbo.equipment'))
 BEGIN
     CREATE INDEX idx_equipment_type_seq ON dbo.equipment (type, sequence_number);
@@ -275,3 +283,16 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_findings_status' AND 
 BEGIN
     CREATE INDEX idx_findings_status ON dbo.safety_findings (status);
 END;
+
+-- 12. Floor Plans Table (รูปภาพและผังแปลนอาคาร)
+IF OBJECT_ID('dbo.floor_plans', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.floor_plans (
+        id VARCHAR(100) NOT NULL PRIMARY KEY,
+        name NVARCHAR(255) NOT NULL,
+        category VARCHAR(50) NOT NULL,
+        image_url NVARCHAR(MAX) NOT NULL,
+        updated_at NVARCHAR(50) NOT NULL
+    );
+END;
+

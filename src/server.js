@@ -1009,6 +1009,9 @@ app.put('/api/equipment/:id', async (req, res) => {
         location_photo = COALESCE(@location_photo, location_photo),
         responsible_person = COALESCE(@responsible_person, responsible_person),
         usage_status = COALESCE(@usage_status, usage_status),
+        map_zone_id = CASE WHEN @has_map_zone = 1 THEN @map_zone_id ELSE map_zone_id END,
+        map_x = CASE WHEN @has_map_x = 1 THEN @map_x ELSE map_x END,
+        map_y = CASE WHEN @has_map_y = 1 THEN @map_y ELSE map_y END,
         updated_at = @now
       WHERE id = @id
     `, {
@@ -1020,8 +1023,41 @@ app.put('/api/equipment/:id', async (req, res) => {
       location_photo: data.location_photo || null,
       responsible_person: data.responsible_person !== undefined ? data.responsible_person : null,
       usage_status: data.usage_status !== undefined ? data.usage_status : null,
+      has_map_zone: data.map_zone_id !== undefined ? 1 : 0,
+      map_zone_id: data.map_zone_id || null,
+      has_map_x: data.map_x !== undefined ? 1 : 0,
+      map_x: data.map_x !== undefined && data.map_x !== null ? Number(data.map_x) : null,
+      has_map_y: data.map_y !== undefined ? 1 : 0,
+      map_y: data.map_y !== undefined && data.map_y !== null ? Number(data.map_y) : null,
       now,
       id
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/equipment/:id/map-position', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { map_zone_id, map_x, map_y } = req.body;
+    const now = new Date().toISOString();
+
+    await query(`
+      UPDATE dbo.equipment SET
+        map_zone_id = @map_zone_id,
+        map_x = @map_x,
+        map_y = @map_y,
+        updated_at = @now
+      WHERE id = @id
+    `, {
+      id,
+      map_zone_id: map_zone_id || null,
+      map_x: map_x !== undefined && map_x !== null ? Number(map_x) : null,
+      map_y: map_y !== undefined && map_y !== null ? Number(map_y) : null,
+      now
     });
 
     res.json({ success: true });
@@ -1075,6 +1111,46 @@ app.post('/api/equipment/:id/resolve-defect', async (req, res) => {
     `, { defectNotes, now, id });
 
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// Floor Plans & Map Endpoints
+// ==========================================
+app.get('/api/floor-plans', async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM dbo.floor_plans ORDER BY id ASC');
+    res.json({ floorPlans: result.recordset || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/floor-plans', async (req, res) => {
+  try {
+    const { id, name, category, image_url } = req.body;
+    if (!id || !image_url) {
+      return res.status(400).json({ error: 'id and image_url are required' });
+    }
+    const now = new Date().toISOString();
+    await query(`
+      MERGE dbo.floor_plans AS target
+      USING (VALUES (@id, @name, @category, @image_url, @now)) AS source (id, name, category, image_url, updated_at)
+      ON (target.id = source.id)
+      WHEN MATCHED THEN
+        UPDATE SET name = source.name, category = source.category, image_url = source.image_url, updated_at = source.updated_at
+      WHEN NOT MATCHED THEN
+        INSERT (id, name, category, image_url, updated_at) VALUES (source.id, source.name, source.category, source.image_url, source.updated_at);
+    `, {
+      id,
+      name: name || id,
+      category: category || 'GENERAL',
+      image_url,
+      now
+    });
+    res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2839,6 +2915,32 @@ async function start() {
       console.log('Positions seed notice:', e.message);
     }
 
+
+    // Ensure map columns in dbo.equipment and dbo.floor_plans table
+    try {
+      await query(`
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.equipment') AND name = 'map_zone_id')
+        BEGIN
+          ALTER TABLE dbo.equipment ADD map_zone_id NVARCHAR(100) NULL;
+          ALTER TABLE dbo.equipment ADD map_x FLOAT NULL;
+          ALTER TABLE dbo.equipment ADD map_y FLOAT NULL;
+        END;
+
+        IF OBJECT_ID('dbo.floor_plans', 'U') IS NULL
+        BEGIN
+          CREATE TABLE dbo.floor_plans (
+            id VARCHAR(100) NOT NULL PRIMARY KEY,
+            name NVARCHAR(255) NOT NULL,
+            category VARCHAR(50) NOT NULL,
+            image_url NVARCHAR(MAX) NOT NULL,
+            updated_at NVARCHAR(50) NOT NULL
+          );
+        END;
+      `);
+      console.log('✅ ตรวจสอบโครงสร้างตารางแผนผัง (Map & Floor Plans) เรียบร้อย');
+    } catch (e) {
+      console.log('Map & Floor plans schema notice:', e.message);
+    }
 
     // Start background cron jobs
     startScheduler();
