@@ -183,8 +183,12 @@ app.get('/', (req, res) => {
 app.get('/api/health', async (req, res) => {
   const storageInfo = getStorageInfo();
   try {
-    const testResult = await query('SELECT 1 as is_alive');
-    const isDbAlive = Boolean(testResult.recordset && testResult.recordset[0]?.is_alive === 1);
+    const shouldCheckDb = req.query.db === '1' || req.query.checkDb === 'true';
+    let isDbAlive = null;
+    if (shouldCheckDb) {
+      const testResult = await query('SELECT 1 as is_alive');
+      isDbAlive = Boolean(testResult.recordset && testResult.recordset[0]?.is_alive === 1);
+    }
     res.json({
       status: 'ok',
       service: 'shesystem-azure-sql-api',
@@ -192,7 +196,7 @@ app.get('/api/health', async (req, res) => {
         type: 'Microsoft Azure SQL Database',
         server: process.env.AZURE_SQL_SERVER || 'halls.database.windows.net',
         name: process.env.AZURE_SQL_DATABASE || 'shedatabase',
-        db_alive: isDbAlive
+        db_alive: shouldCheckDb ? isDbAlive : 'idle_or_paused (use ?db=1 to probe)'
       },
       storage: storageInfo,
       timestamp: new Date().toISOString()

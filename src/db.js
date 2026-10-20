@@ -38,10 +38,11 @@ function getDbConfig() {
     pool: {
       max: parseInt(process.env.AZURE_SQL_POOL_MAX || '10', 10),
       min: parseInt(process.env.AZURE_SQL_POOL_MIN || '0', 10),
-      idleTimeoutMillis: 30000
+      idleTimeoutMillis: 15000 // Release idle connections quickly to allow Serverless Auto-Pause
     },
-    connectionTimeout: 30000,
-    requestTimeout: 30000
+    // Increased to 60s to accommodate Azure SQL Serverless cold-start wakeup time (~30-50s)
+    connectionTimeout: parseInt(process.env.AZURE_SQL_CONNECTION_TIMEOUT || '60000', 10),
+    requestTimeout: parseInt(process.env.AZURE_SQL_REQUEST_TIMEOUT || '60000', 10)
   };
 }
 
@@ -50,11 +51,19 @@ let poolPromise = null;
 export async function getPool() {
   if (!poolPromise) {
     const config = getDbConfig();
-    poolPromise = new sql.ConnectionPool(config)
+    const pool = new sql.ConnectionPool(config);
+
+    // Listen for pool connection errors (e.g. when Azure SQL auto-pauses and disconnects)
+    pool.on('error', (err) => {
+      console.warn('⚠️ Azure SQL Connection Pool notice:', err.message);
+      poolPromise = null;
+    });
+
+    poolPromise = pool
       .connect()
-      .then((pool) => {
+      .then((connectedPool) => {
         console.log('✅ เชื่อมต่อ Azure SQL Database สำเร็จ!');
-        return pool;
+        return connectedPool;
       })
       .catch((err) => {
         console.error('❌ เกิดข้อผิดพลาดในการเชื่อมต่อ Azure SQL Database:', err.message);
@@ -66,32 +75,55 @@ export async function getPool() {
 }
 
 /**
- * Execute parameterized query
+ * Execute parameterized query with automatic single retry for transient / cold-start resume
  * @param {string} queryText - T-SQL query string using @param placeholders
  * @param {Object} [params] - Key-value pair of parameters
  */
 export async function query(queryText, params = {}) {
-  const pool = await getPool();
-  const request = pool.request();
+  const executeQuery = async () => {
+    const pool = await getPool();
+    const request = pool.request();
 
-  for (const [key, val] of Object.entries(params)) {
-    if (val === undefined || val === null) {
-      request.input(key, sql.NVarChar, null);
-    } else if (typeof val === 'number') {
-      if (Number.isInteger(val)) {
-        request.input(key, sql.Int, val);
+    for (const [key, val] of Object.entries(params)) {
+      if (val === undefined || val === null) {
+        request.input(key, sql.NVarChar, null);
+      } else if (typeof val === 'number') {
+        if (Number.isInteger(val)) {
+          request.input(key, sql.Int, val);
+        } else {
+          request.input(key, sql.Float, val);
+        }
+      } else if (typeof val === 'boolean') {
+        request.input(key, sql.Bit, val ? 1 : 0);
       } else {
-        request.input(key, sql.Float, val);
+        request.input(key, sql.NVarChar, String(val));
       }
-    } else if (typeof val === 'boolean') {
-      request.input(key, sql.Bit, val ? 1 : 0);
-    } else {
-      request.input(key, sql.NVarChar, String(val));
     }
-  }
 
-  const result = await request.query(queryText);
-  return result;
+    return await request.query(queryText);
+  };
+
+  try {
+    return await executeQuery();
+  } catch (err) {
+    const msg = (err.message || '').toLowerCase();
+    const isTransient =
+      msg.includes('closed') ||
+      msg.includes('timeout') ||
+      msg.includes('connection') ||
+      msg.includes('failed to connect') ||
+      err.code === 'ECONNRESET' ||
+      err.code === 'ETIMEOUT';
+
+    if (isTransient) {
+      console.warn('⚠️ เกิดข้อผิดพลาดชั่วคราวในการเชื่อมต่อ DB (อาจกำลังตื่นจาก Auto-pause):', err.message);
+      console.log('🔄 กำลังรอ 3 วินาทีและพยายามเชื่อมต่อใหม่...');
+      poolPromise = null;
+      await new Promise((res) => setTimeout(res, 3000));
+      return await executeQuery();
+    }
+    throw err;
+  }
 }
 
 /**

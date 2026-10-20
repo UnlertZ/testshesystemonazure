@@ -173,10 +173,11 @@ export async function runAutoCloseSafetyPatrols() {
  * Initialize cron scheduled triggers
  * 1. Monthly Reset: Run at 00:00 on the 1st day of every month (Thai Time UTC+7)
  * 2. 2-Year Retention Purge: Runs at 02:00 on the 1st day of every month
- * 3. Auto-close expired Safety Committee patrol rounds: Every 30 seconds
+ * (Auto-close Safety Committee patrol rounds runs on-demand when users view or access the patrol endpoints,
+ * avoiding continuous 30-second database polling to allow Azure SQL Serverless Auto-Pause to save vCore credits)
  */
 export function startScheduler() {
-  // Check every hour whether it is 00:00 Thai Time on day 1
+  // Check every hour whether it is 00:00 Thai Time on day 1 (in-memory check, no DB query unless matched)
   cron.schedule('0 * * * *', async () => {
     const now = new Date();
     const thaiDate = new Date(now.getTime() + 7 * 60 * 60 * 1000);
@@ -194,13 +195,5 @@ export function startScheduler() {
     }
   });
 
-  // High-precision 30-second interval check for responsive closing
-  setInterval(() => {
-    runAutoCloseSafetyPatrols();
-  }, 30000);
-
-  // Initial immediate run on server boot
-  runAutoCloseSafetyPatrols();
-
-  console.log('⏰ ระบบ Scheduler (Monthly Reset, 2-Year Purge & Auto-close คปอ.) เริ่มทำงานแล้ว');
+  console.log('⏰ ระบบ Scheduler (Monthly Reset & 2-Year Purge) พร้อมทำงาน (On-demand closing เปิดใช้งานแล้ว)');
 }
